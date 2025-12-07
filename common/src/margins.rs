@@ -4,7 +4,6 @@ use crate::{
     math::PermuteXYZ,
     node::{Chunk, ChunkId, VoxelData},
     voxel_math::{ChunkAxisPermutation, ChunkDirection, CoordAxis, CoordSign, Coords},
-    world::TileID,
 };
 
 /// Updates the margins of both `voxels` and `neighbor_voxels` at the side they meet at.
@@ -85,7 +84,7 @@ fn all_voxels_at_face(
     dimension: u8,
     voxels: &VoxelData,
     direction: ChunkDirection,
-    f: impl Fn(TileID) -> bool,
+    f: impl Fn(u16) -> bool,
 ) -> bool {
     let boundary_coord = CoordsWithMargins::boundary_coord(dimension, direction.sign);
     for j in 0..dimension {

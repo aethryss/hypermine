@@ -20,20 +20,19 @@ use common::{
         Inventory, Position,
     },
     sanitize_motion_input,
-    world::{TILE_ID_WOOD_PLANKS, TILE_ID_GRASS, TILE_ID_DIRT, TILE_ID_SAND, TILE_ID_SNOW_BLOCK, TILE_ID_BRICK, TILE_ID_WATER, TILE_ID_LAVA, TILE_ID_AIR},
 };
 
 const MATERIAL_PALETTE: [u16; 10] = [
-    TILE_ID_WOOD_PLANKS,
-    TILE_ID_GRASS,
-    TILE_ID_DIRT,
-    TILE_ID_SAND,
-    TILE_ID_SNOW_BLOCK,
-    TILE_ID_BRICK,
-    TILE_ID_BRICK,
-    TILE_ID_BRICK,
-    TILE_ID_WATER,
-    TILE_ID_LAVA,
+    5,  // WOOD_PLANKS
+    2,  // GRASS
+    3,  // DIRT
+    12, // SAND
+    54, // SNOW_BLOCK
+    33, // BRICK
+    33, // BRICK
+    33, // BRICK
+    8,  // WATER
+    10, // LAVA
 ];
 
 /// Game state
@@ -112,7 +111,7 @@ impl Sim {
             jump_held: false,
             place_block_pressed: false,
             break_block_pressed: false,
-            selected_tile: TILE_ID_WOOD_PLANKS,
+            selected_tile: 5, // WOOD_PLANKS
             prediction: PredictedMotion::new(proto::Position {
                 node: NodeId::ROOT,
                 local: MIsometry::identity(),
@@ -591,7 +590,7 @@ impl Sim {
         let material = if placing {
             self.selected_tile
         } else {
-            TILE_ID_AIR
+            0 // AIR
         };
 
         let consumed_entity = if placing && self.cfg.gameplay_enabled {

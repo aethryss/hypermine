@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EntityId, SimConfig, Step, dodeca, graph::NodeId, math::MIsometry, node::ChunkId,
-    voxel_math::Coords, world::TileID,
+    voxel_math::Coords, world::BlockID,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -79,13 +79,13 @@ pub struct CharacterInput {
 pub struct BlockUpdate {
     pub chunk_id: ChunkId,
     pub coords: Coords,
-    pub new_tile_id: TileID,
+    pub new_tile_id: BlockID,
     pub consumed_entity: Option<EntityId>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SerializedVoxelData {
-    /// Dense 3D array of 16-bit tile IDs for all voxels in this chunk
+    /// Dense 3D array of 16-bit block IDs for all voxels in this chunk
     pub inner: Vec<u8>,
 }
 
@@ -93,7 +93,7 @@ pub struct SerializedVoxelData {
 pub enum Component {
     Character(Character),
     Position(Position),
-    TileID(TileID),
+    TileID(BlockID),
     Inventory(Inventory),
 }
 

@@ -1,4 +1,3 @@
-use crate::world::TILE_ID_AIR;
 /*the name of this module is pretty arbitrary at the moment*/
 
 use std::ops::{Index, IndexMut};
@@ -11,7 +10,7 @@ use crate::graph::{Graph, NodeId};
 use crate::lru_slab::SlotId;
 use crate::proto::{BlockUpdate, Position, SerializedVoxelData};
 use crate::voxel_math::{ChunkDirection, CoordAxis, CoordSign, Coords};
-use crate::world::TileID;
+use crate::world::BlockID;
 use crate::worldgen::NodeState;
 use crate::{Chunks, margins};
 
@@ -153,7 +152,7 @@ impl Graph {
     }
 
     /// Returns the material at the specified coordinates of the specified chunk, if the chunk is generated
-    pub fn get_tile_id(&self, chunk_id: ChunkId, coords: Coords) -> Option<TileID> {
+    pub fn get_tile_id(&self, chunk_id: ChunkId, coords: Coords) -> Option<BlockID> {
         let dimension = self.layout().dimension;
 
         let Chunk::Populated { voxels, .. } = &self[chunk_id] else {
@@ -264,29 +263,29 @@ pub enum Chunk {
 /// The margin consists of voxels of adjacent chunks, which is a necessary extra
 /// piece of data needed to properly compute the rendered surface of the chunk.
 pub enum VoxelData {
-    /// All voxels, including the margin, are the same tile type (TileID).
-    Solid(TileID),
+    /// All voxels, including the margin, are the same block type (BlockID).
+    Solid(BlockID),
 
-    /// This chunk (or its margins) may consist of multiple tile types, which are
+    /// This chunk (or its margins) may consist of multiple block types, which are
     /// represented in the given boxed slice.
-    Dense(Box<[TileID]>),
+    Dense(Box<[BlockID]>),
 }
 
 impl VoxelData {
-    pub fn data_mut(&mut self, dimension: u8) -> &mut [TileID] {
+    pub fn data_mut(&mut self, dimension: u8) -> &mut [BlockID] {
         match *self {
             VoxelData::Dense(ref mut d) => d,
-            VoxelData::Solid(tile_id) => {
-                *self = VoxelData::Dense(vec![tile_id; (usize::from(dimension) + 2).pow(3)].into());
+            VoxelData::Solid(block_id) => {
+                *self = VoxelData::Dense(vec![block_id; (usize::from(dimension) + 2).pow(3)].into());
                 self.data_mut(dimension)
             }
         }
     }
 
-    pub fn get(&self, index: usize) -> TileID {
+    pub fn get(&self, index: usize) -> BlockID {
         match *self {
             VoxelData::Dense(ref d) => d[index],
-            VoxelData::Solid(tile_id) => tile_id,
+            VoxelData::Solid(block_id) => block_id,
         }
     }
 
@@ -309,7 +308,7 @@ impl VoxelData {
             .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
 
-    let mut data = vec![TILE_ID_AIR; (usize::from(dimension) + 2).pow(3)];
+    let mut data = vec![0u16; (usize::from(dimension) + 2).pow(3)]; // 0 is Air
         for z in 0..dimension {
             for y in 0..dimension {
                 for x in 0..dimension {

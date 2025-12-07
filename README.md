@@ -27,7 +27,6 @@ Shared mathematical primitives and world simulation logic:
 - **Minkowski space mathematics** for hyperbolic geometry operations (4D vectors and matrices)
 - **Dodecahedral node system**: 12-sided building blocks that tile hyperbolic space
 - **Chunk management**: 20 voxel chunks per node (one per dodecahedral vertex)
-- **World generation**: Procedural terrain using Voronoi-based biome placement
 - **Collision math**: Ray casting and sphere casting in hyperbolic space
 - **Physics**: Character controller with gravity and movement constraints
 

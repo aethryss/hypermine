@@ -5,7 +5,6 @@ use common::dodeca::{Side, Vertex};
 use common::math::MIsometry;
 use common::node::VoxelData;
 use common::proto::{BlockUpdate, Inventory, SerializedVoxelData};
-use common::world::TILE_ID_AIR;
 use common::{GraphEntities, node::ChunkId};
 use fxhash::{FxHashMap, FxHashSet};
 use hecs::{DynamicBundle, Entity, EntityBuilder};
@@ -675,7 +674,7 @@ impl Sim {
             return;
         };
         if self.cfg.gameplay_enabled {
-            if block_update.new_tile_id != TILE_ID_AIR {
+            if block_update.new_tile_id != 0 { // 0 is Air
                 let Some(consumed_entity_id) = block_update.consumed_entity else {
                     tracing::warn!("Tried to place block without consuming any entities");
                     return;
@@ -698,7 +697,7 @@ impl Sim {
                 }
                 self.destroy(consumed_entity);
             }
-            if old_tile_id != TILE_ID_AIR {
+            if old_tile_id != 0 { // 0 is Air
                 let (produced_entity, _) = self.spawn((subject_node, old_tile_id));
                 self.add_to_inventory(subject, produced_entity);
             }

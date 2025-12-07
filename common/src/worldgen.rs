@@ -1,4 +1,3 @@
-use crate::world::{TILE_ID_AIR, TILE_ID_STONE};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -8,7 +7,6 @@ use crate::{
     math::MVector,
     node::{ChunkId, VoxelData},
     plane::Plane,
-    world::TileID,
 };
 use crate::proto::Position as ProtoPosition;
 use crate::math::MPoint;
@@ -154,7 +152,7 @@ impl ChunkParams {
     /// Generate voxels making up a flat geodesic plane chunk
     /// Simple rule: stone below surface (negative elevation), air above
     pub fn generate_voxels(&self) -> VoxelData {
-        let mut voxels = VoxelData::Solid(TILE_ID_AIR);
+        let mut voxels = VoxelData::Solid(0); // Block ID 0 is Air
         
         for (x, y, z) in VoxelCoords::new(self.dimension) {
             let coords = na::Vector3::new(x, y, z);
@@ -163,7 +161,7 @@ impl ChunkParams {
             
             // Simple flat plane: stone below surface (negative elevation), air above
             if voxel_elevation < 0.0 {
-                voxels.data_mut(self.dimension)[index(self.dimension, coords)] = TILE_ID_STONE;
+                voxels.data_mut(self.dimension)[index(self.dimension, coords)] = 1; // Block ID 1 is Stone
             }
         }
         

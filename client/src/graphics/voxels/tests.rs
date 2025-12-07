@@ -6,7 +6,7 @@ use renderdoc::{RenderDoc, V110};
 
 use super::{SurfaceExtraction, surface_extraction};
 use crate::graphics::{Base, VkDrawIndirectCommand};
-use common::world::TileID;
+use common::world::BlockID;
 
 struct SurfaceExtractionTest {
     gfx: Arc<Base>,

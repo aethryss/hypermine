@@ -1,4 +1,3 @@
-use crate::world::TILE_ID_AIR;
 use crate::{
     collision_math::Ray,
     math::{MVector, PermuteXYZ},
@@ -302,7 +301,7 @@ fn voxel_is_solid(voxel_data: &VoxelData, layout: &ChunkLayout, coords: [u8; 3])
     debug_assert!(coords[0] < layout.dimension());
     debug_assert!(coords[1] < layout.dimension());
     debug_assert!(coords[2] < layout.dimension());
-    voxel_data.get(Coords(coords).to_index(layout.dimension())) != TILE_ID_AIR
+    voxel_data.get(Coords(coords).to_index(layout.dimension())) != 0 // 0 is Air
 }
 
 #[cfg(test)]
@@ -325,7 +324,7 @@ mod tests {
             let mut ctx = TestSphereCastContext {
                 collider_radius,
                 layout: ChunkLayout::new(dimension),
-                voxel_data: VoxelData::Solid(TILE_ID_AIR),
+                voxel_data: VoxelData::Solid(0), // 0 is Air
             };
 
             // Populate voxels. Consists of a single voxel with voxel coordinates (1, 1, 1). The cube corresponding
