@@ -1,10 +1,10 @@
-# Hypermine
+# Hyperbolicraft
 
 A voxel sandbox game exploring hyperbolic geometry, built in Rust with Vulkan rendering and networked multiplayer support.
 
 ## Overview
 
-Hypermine is an ambitious experiment in game design and mathematics, bringing the alien landscape of **hyperbolic space** to life as a playable voxel world. Instead of Euclidean (flat) geometry, the world exists on a hyperbolic plane where the sum of angles in a triangle is less than 180°, creating an endlessly expanding and visually disorienting environment.
+Hyperbolicraft is an ambitious experiment in game design and mathematics, bringing the alien landscape of **hyperbolic space** to life as a playable voxel world. Instead of Euclidean (flat) geometry, the world exists on a hyperbolic plane where the sum of angles in a triangle is less than 180°, creating an endlessly expanding and visually disorienting environment.
 
 The game features:
 
@@ -20,7 +20,7 @@ The game features:
 
 ## Architecture
 
-Hypermine is structured as a Rust workspace with four main crates:
+Hyperbolicraft is structured as a Rust workspace with four main crates:
 
 ### `common`
 Shared mathematical primitives and world simulation logic:
@@ -67,7 +67,7 @@ The project implements sophisticated hyperbolic space mathematics:
 - See [docs/README.md](docs/README.md) for comprehensive mathematical background
 
 ### Dodecahedral Tiling
-Instead of infinite Euclidean grids, Hypermine uses the **order-4 dodecahedral honeycomb**:
+Instead of infinite Euclidean grids, Hyperbolicraft uses the **order-4 dodecahedral honeycomb**:
 - Each dodecahedron (node) contains 20 chunks (one per vertex)
 - Chunks are connected via edges and faces to create a seamless tiling
 - Coordinate systems automatically handle wrapping and reflection across boundaries
@@ -120,14 +120,14 @@ Run the client and create a new world through the UI.
 3. Multiple players can explore and build in the same world
 
 ### Configuration
-Configuration is stored in the project directory under `hypermine/`:
+Configuration is stored in the project directory under `hyperbolicraft/`:
 - `config.toml`: Client settings (rendering, input, server address)
 - Save data is stored per-world with automatic persistence
 
 ## Project Structure
 
 ```
-hypermine/
+hyperbolicraft/
 ├── common/          # Shared crates (math, physics, world)
 ├── client/          # Game client (graphics, UI, input)
 ├── server/          # Game server (simulation, networking)

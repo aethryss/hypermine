@@ -67,7 +67,7 @@ pub async fn run() -> Result<()> {
 
     let sim_cfg = SimConfig::from_raw(&cfg.simulation);
 
-    let save = cfg.save.unwrap_or_else(|| "hypermine.save".into());
+    let save = cfg.save.unwrap_or_else(|| "hyperbolicraft.save".into());
     info!("using save file {}", save.display());
     let save = Save::open(&save, sim_cfg.chunk_size)?;
 

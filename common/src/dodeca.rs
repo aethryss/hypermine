@@ -97,7 +97,7 @@ impl Side {
 
 /// Vertices of a right dodecahedron
 ///
-/// In Hypermine, each dodecahedral node consists of 20 chunks, one for each
+/// In Hyperbolicraft, each dodecahedral node consists of 20 chunks, one for each
 /// vertex, shaped like an irregular cube. Each chunk can also be thought of as
 /// an eighth of a cube in the dual cubic tiling.
 ///

@@ -1,10 +1,10 @@
 # Current outline
 This is subject to change.
 * Introduction
-* How to play Hypermine
+* How to play Hyperbolicraft
     * Controls
     * Config file
-    * The save file (with a warning that compatibility between versions of Hypermine are not guaranteed and another warning to back up save files)
+    * The save file (with a warning that compatibility between versions of Hyperbolicraft are not guaranteed and another warning to back up save files)
     * Setting up multiplayer
 * Background math
     * Linear algebra
@@ -28,7 +28,7 @@ This is subject to change.
         * A note about floating point precision
         * (Do we put advanced shape-casting math here? Probably not.)
 * Tiling the world
-    * Nodes and their coordinate systems (describing the order-4 dodecahedral honeycomb and how Hypermine uses it)
+    * Nodes and their coordinate systems (describing the order-4 dodecahedral honeycomb and how Hyperbolicraft uses it)
     * Chunks and their coordinate systems (explaining node_to_dual and dual_to_node)
     * Voxels within chunks (Margins should be mentioned here.)
     * The graph (how dodecahedra are organized into the tiling in code. Also mention how NodeId works.)
@@ -81,7 +81,7 @@ This is subject to change.
 * As 3D geometry can be difficult to visualize, we should use a 2D analogy for anything that can be reduced to 2D without loss of generality. For instance, many diagrams that explain concepts can be 2D.
     * It should still be made clear how the analogy extends to 3D.
 * To avoid running up against GitHub limits or making repositories take longer to clone, larger images and videos will need to be generated on the reader's machine.
-    * One option would be to add functionality to Hypermine itself for these visualizations. It is not decided what the preferred approach is.
+    * One option would be to add functionality to Hyperbolicraft itself for these visualizations. It is not decided what the preferred approach is.
     * Images that don't take up much storage are fine to store with Git LFS. Try to keep the total size of all assets used in the documentation under approximately 1 MiB (subject to change based on feasibility/importance of larger images). It should be possible to use the SVG file format to keep most images very small. Producing such images with code is still recommended.
 * We should try to keep the reader interested/motivated, making the documentation enjoyable to read.
     * Animations and interactive visualizations can help with this a lot (in addition to helping the learning process).

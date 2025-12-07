@@ -33,7 +33,7 @@ pub struct EarlyWindow {
 impl EarlyWindow {
     pub fn new(event_loop: &ActiveEventLoop) -> Self {
         let mut attrs = WinitWindow::default_attributes();
-        attrs.title = "hypermine".into();
+        attrs.title = "hyperbolicraft".into();
         let window = event_loop.create_window(attrs).unwrap();
         Self {
             window,

@@ -13,7 +13,7 @@ fn main() {
     common::init_tracing();
     let metrics = crate::metrics::init();
 
-    let dirs = Arc::new(directories::ProjectDirs::from("", "", "hypermine").unwrap());
+    let dirs = Arc::new(directories::ProjectDirs::from("", "", "hyperbolicraft").unwrap());
     let (config, raw_config) = Config::load_with_raw(&dirs);
     let config = Arc::new(config);
 

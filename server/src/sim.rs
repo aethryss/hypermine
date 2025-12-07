@@ -196,7 +196,7 @@ impl Sim {
                 if current_node != node {
                     // Skip loading named entities that are in the wrong place. This can happen
                     // when there are multiple entities with the same name, which has been possible
-                    // in previous versions of Hypermine.
+                    // in previous versions of Hyperbolicraft.
                     error!(
                         "Entity {} will not be loaded because their node path information is incorrect.",
                         name

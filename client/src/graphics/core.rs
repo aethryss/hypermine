@@ -61,7 +61,7 @@ impl Core {
                     .collect::<Vec<_>>()
             );
 
-            let name = cstr!("hypermine");
+            let name = cstr!("hyperbolicraft");
 
             let app_info = vk::ApplicationInfo::default()
                 .application_name(name)
