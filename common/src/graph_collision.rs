@@ -155,7 +155,7 @@ mod tests {
             for (node, _) in nearby_nodes(&graph, &Position::origin(), graph_radius) {
                 for vertex in dodeca::Vertex::iter() {
                     graph[ChunkId::new(node, vertex)] = Chunk::Populated {
-                        voxels: VoxelData::Solid(Material::Void),
+                        voxels: VoxelData::Solid(TILE_ID_AIR),
                         surface: None,
                         old_surface: None,
                     };
@@ -428,7 +428,7 @@ mod tests {
         {
             for vertex in dodeca::Vertex::iter() {
                 graph[ChunkId::new(node, vertex)] = Chunk::Populated {
-                    voxels: VoxelData::Solid(Material::Void),
+                    voxels: VoxelData::Solid(TILE_ID_AIR),
                     surface: None,
                     old_surface: None,
                 };

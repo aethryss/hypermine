@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread};
+use std::{net::SocketAddr, sync::Arc, thread};
 
 use anyhow::{Result, anyhow};
 use quinn::rustls;
@@ -10,13 +10,17 @@ use common::{
 };
 use server::Message;
 
-use crate::Config;
+pub struct Options {
+    pub name: Arc<str>,
+    pub server: SocketAddr,
+}
 
-pub fn spawn(cfg: Arc<Config>) -> server::Handle {
+pub fn spawn(options: Options) -> server::Handle {
     let (incoming_send, incoming_recv) = mpsc::unbounded_channel();
     let (outgoing_send, outgoing_recv) = mpsc::unbounded_channel();
+    let Options { name, server } = options;
     thread::spawn(move || {
-        if let Err(e) = run(cfg, incoming_send.clone(), outgoing_recv) {
+        if let Err(e) = run(name, server, incoming_send.clone(), outgoing_recv) {
             let _ = incoming_send.send(Message::ConnectionLost(e));
         }
     });
@@ -28,7 +32,8 @@ pub fn spawn(cfg: Arc<Config>) -> server::Handle {
 
 #[tokio::main(worker_threads = 1)]
 async fn run(
-    cfg: Arc<Config>,
+    name: Arc<str>,
+    server: SocketAddr,
     incoming: mpsc::UnboundedSender<Message>,
     outgoing: mpsc::UnboundedReceiver<proto::Command>,
 ) -> Result<()> {
@@ -42,18 +47,18 @@ async fn run(
     ));
     endpoint.set_default_client_config(client_cfg);
 
-    let result = inner(cfg, incoming, outgoing, endpoint.clone()).await;
+    let result = inner(name, server, incoming, outgoing, endpoint.clone()).await;
     endpoint.wait_idle().await;
     result
 }
 
 async fn inner(
-    cfg: Arc<Config>,
+    name: Arc<str>,
+    server: SocketAddr,
     incoming: mpsc::UnboundedSender<Message>,
     outgoing: mpsc::UnboundedReceiver<proto::Command>,
     endpoint: quinn::Endpoint,
 ) -> Result<()> {
-    let server = cfg.server.unwrap();
     let connection = endpoint.connect(server, "localhost").unwrap().await?;
 
     // Open the first stream for our hello message
@@ -64,7 +69,7 @@ async fn inner(
     codec::send_whole(
         clienthello_stream,
         &proto::ClientHello {
-            name: (*cfg.name).into(),
+            name: (*name).into(),
         },
     )
     .await?;

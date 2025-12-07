@@ -236,8 +236,8 @@ impl Base {
             let linear_sampler = device
                 .create_sampler(
                     &vk::SamplerCreateInfo::default()
-                        .min_filter(vk::Filter::LINEAR)
-                        .mag_filter(vk::Filter::LINEAR)
+                        .min_filter(vk::Filter::NEAREST)
+                        .mag_filter(vk::Filter::NEAREST)
                         .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
                         .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                         .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)

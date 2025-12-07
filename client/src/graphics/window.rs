@@ -1,23 +1,28 @@
 use std::sync::Arc;
 use std::time::Instant;
-use std::{f32, os::raw::c_char};
+use std::{f32, os::raw::c_char, path::PathBuf, thread};
 
 use ash::{khr, vk};
+use directories::ProjectDirs;
 use lahar::DedicatedImage;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use tracing::{error, info};
+use save::Save;
+use tokio::runtime::Builder;
+use tracing::{debug, error, error_span, info, Instrument};
 use winit::event::KeyEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::{
     dpi::PhysicalSize,
-    event::{DeviceEvent, ElementState, MouseButton, WindowEvent},
+    event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     window::{CursorGrabMode, Window as WinitWindow},
 };
 
-use super::gui::GuiState;
+use super::gui::{GuiAction, GuiState, SessionOptions};
 use super::{Base, Core, Draw, Frustum};
-use crate::{Config, Sim};
+use crate::{config::RawConfig, net, Config, Sim};
+use common::proto;
+use server::{self, Message, Server};
 
 /// OS window
 pub struct EarlyWindow {
@@ -50,6 +55,9 @@ pub struct Window {
     _core: Arc<Core>,
     pub window: WinitWindow,
     config: Arc<Config>,
+    dirs: Arc<ProjectDirs>,
+    config_path: PathBuf,
+    raw_config: RawConfig,
     surface_fn: khr::surface::Instance,
     surface: vk::SurfaceKHR,
     swapchain: Option<SwapchainMgr>,
@@ -58,7 +66,9 @@ pub struct Window {
     sim: Option<Sim>,
     gui_state: GuiState,
     yak: yakui::Yakui,
-    net: server::Handle,
+    yak_winit: yakui_winit::YakuiWinit,
+    net: Option<server::Handle>,
+    active_session: Option<SessionOptions>,
     input: InputState,
     last_frame: Option<Instant>,
 }
@@ -69,7 +79,8 @@ impl Window {
         early: EarlyWindow,
         core: Arc<Core>,
         config: Arc<Config>,
-        net: server::Handle,
+        dirs: Arc<ProjectDirs>,
+        raw_config: RawConfig,
     ) -> Self {
         let surface = unsafe {
             ash_window::create_surface(
@@ -82,20 +93,29 @@ impl Window {
             .unwrap()
         };
         let surface_fn = khr::surface::Instance::new(&core.entry, &core.instance);
+        let config_path = Config::config_path(&dirs);
+        let gui_state = GuiState::new(raw_config.clone());
+        let yak = yakui::Yakui::new();
+        let yak_winit = yakui_winit::YakuiWinit::new(&early.window);
 
         Self {
             _core: core,
             window: early.window,
             config,
+            dirs,
+            config_path,
+            raw_config,
             surface,
             surface_fn,
             swapchain: None,
             swapchain_needs_update: false,
             draw: None,
             sim: None,
-            gui_state: GuiState::new(),
-            yak: yakui::Yakui::new(),
-            net,
+            gui_state,
+            yak,
+            yak_winit,
+            net: None,
+            active_session: None,
             input: InputState::default(),
             last_frame: None,
         }
@@ -138,13 +158,22 @@ impl Window {
     }
 
     pub fn handle_event(&mut self, event: WindowEvent, event_loop: &ActiveEventLoop) {
+        // Forward events to yakui first for GUI handling
+        self.yak_winit.handle_window_event(&mut self.yak, &event);
+        
         match event {
             WindowEvent::RedrawRequested => {
-                while let Ok(msg) = self.net.incoming.try_recv() {
+                let mut pending_messages = Vec::new();
+                if let Some(net) = self.net.as_mut() {
+                    while let Ok(msg) = net.incoming.try_recv() {
+                        pending_messages.push(msg);
+                    }
+                }
+                for msg in pending_messages {
                     self.handle_net(msg);
                 }
 
-                if let Some(sim) = self.sim.as_mut() {
+                if let (Some(sim), Some(net)) = (self.sim.as_mut(), self.net.as_mut()) {
                     let this_frame = Instant::now();
                     let dt = this_frame - self.last_frame.unwrap_or(this_frame);
                     sim.set_movement_input(self.input.movement());
@@ -152,7 +181,7 @@ impl Window {
 
                     sim.look(0.0, 0.0, 2.0 * self.input.roll() * dt.as_secs_f32());
 
-                    sim.step(dt, &mut self.net);
+                    sim.step(dt, net);
                     self.last_frame = Some(this_frame);
                 }
 
@@ -174,17 +203,18 @@ impl Window {
                 state: ElementState::Pressed,
                 ..
             } => {
-                if self.input.mouse_captured
-                    && let Some(sim) = self.sim.as_mut()
-                {
-                    sim.set_break_block_pressed_true();
+                // Only capture mouse when a sim is active (game has started)
+                if let Some(sim) = self.sim.as_mut() {
+                    if self.input.mouse_captured {
+                        sim.set_break_block_pressed_true();
+                    }
+                    let _ = self
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
+                        .or_else(|_e| self.window.set_cursor_grab(CursorGrabMode::Locked));
+                    self.window.set_cursor_visible(false);
+                    self.input.mouse_captured = true;
                 }
-                let _ = self
-                    .window
-                    .set_cursor_grab(CursorGrabMode::Confined)
-                    .or_else(|_e| self.window.set_cursor_grab(CursorGrabMode::Locked));
-                self.window.set_cursor_visible(false);
-                self.input.mouse_captured = true;
             }
             WindowEvent::MouseInput {
                 button: MouseButton::Right,
@@ -195,6 +225,36 @@ impl Window {
                     && let Some(sim) = self.sim.as_mut()
                 {
                     sim.set_place_block_pressed_true();
+                }
+            }
+            WindowEvent::MouseWheel {
+                delta,
+                ..
+            } => {
+                // Scroll wheel for block selection
+                let scroll_direction = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => {
+                        if y > 0.0 { 1 } else { -1 }
+                    }
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        if pos.y > 0.0 { 1 } else { -1 }
+                    }
+                };
+                
+                let max_tile_id = 70u16; // Total number of tile types (0-69)
+                let current = self.input.selected_tile_id as i32;
+                let new_id = (current + scroll_direction) % max_tile_id as i32;
+                let new_id = if new_id < 0 { 
+                    (max_tile_id as i32 + new_id) as u16 
+                } else { 
+                    new_id as u16 
+                };
+                self.input.selected_tile_id = new_id;
+                
+                // Update the sim with the selected tile ID
+                if let Some(sim) = self.sim.as_mut() {
+                    sim.select_tile_by_id(new_id);
+                    debug!("Selected tile ID: {}", new_id);
                 }
             }
             WindowEvent::KeyboardInput {
@@ -256,7 +316,7 @@ impl Window {
                         && state == ElementState::Pressed
                         && let Some(sim) = self.sim.as_mut()
                     {
-                        sim.select_material(material_idx);
+                        sim.select_tile(material_idx);
                     }
                 }
             },
@@ -271,17 +331,29 @@ impl Window {
         }
     }
 
-    fn handle_net(&mut self, msg: server::Message) {
+    fn handle_net(&mut self, msg: Message) {
         match msg {
-            server::Message::ConnectionLost(e) => {
+            Message::ConnectionLost(e) => {
                 error!("connection lost: {}", e);
+                self.net = None;
+                self.sim = None;
+                self.active_session = None;
+                self.gui_state = GuiState::new(self.raw_config.clone());
+                self.gui_state
+                    .set_error(format!("Connection lost: {}", e));
             }
-            server::Message::Hello(msg) => {
-                let sim = Sim::new(
-                    msg.sim_config,
-                    self.config.chunk_load_parallelism as usize,
-                    msg.character,
-                );
+            Message::Hello(msg) => {
+                let chunk_parallelism = self
+                    .active_session
+                    .as_ref()
+                    .map(|session| session.chunk_parallelism as usize)
+                    .unwrap_or(self.config.chunk_load_parallelism as usize);
+                let start_in_freecam = self
+                    .active_session
+                    .as_ref()
+                    .map(|session| session.start_in_freecam)
+                    .unwrap_or(true);
+                let sim = Sim::new(msg.sim_config, chunk_parallelism, msg.character, start_in_freecam);
                 if let Some(draw) = self.draw.as_mut() {
                     draw.configure(sim.cfg());
                 }
@@ -299,70 +371,184 @@ impl Window {
 
     /// Draw a new frame
     fn draw(&mut self) {
-        let swapchain = self.swapchain.as_mut().unwrap();
+        struct FrameRenderData {
+            frame_id: u32,
+            extent: vk::Extent2D,
+            buffer: vk::Framebuffer,
+            depth_view: vk::ImageView,
+            present: vk::Semaphore,
+            frustum: Frustum,
+        }
+
+        let (frame_data, paint, gui_action) = {
+            let swapchain = self.swapchain.as_mut().unwrap();
+            let draw = self.draw.as_mut().unwrap();
+            unsafe {
+                draw.wait();
+                let frame_id = loop {
+                    if self.swapchain_needs_update {
+                        draw.wait_idle();
+                        swapchain.update(&self.surface_fn, self.surface, self.window.inner_size());
+                        self.swapchain_needs_update = false;
+                    }
+                    match swapchain.acquire_next_image(draw.image_acquired()) {
+                        Ok((idx, suboptimal)) => {
+                            self.swapchain_needs_update = suboptimal;
+                            break idx;
+                        }
+                        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                            self.swapchain_needs_update = true;
+                        }
+                        Err(e) => panic!("acquire_next_image: {e}"),
+                    }
+                };
+                let extent = swapchain.state.extent;
+                let aspect_ratio = extent.width as f32 / extent.height as f32;
+                let frame = &swapchain.state.frames[frame_id as usize];
+                let frustum = Frustum::from_vfov(f32::consts::FRAC_PI_4 * 1.2, aspect_ratio);
+                self.yak
+                    .set_surface_size([extent.width as f32, extent.height as f32].into());
+                self.yak
+                    .set_unscaled_viewport(yakui::geometry::Rect::from_pos_size(
+                        Default::default(),
+                        [extent.width as f32, extent.height as f32].into(),
+                    ));
+                self.yak.start();
+                let action = self.gui_state.run(self.sim.as_ref());
+                self.yak.finish();
+                let paint = self.yak.paint();
+                (
+                    FrameRenderData {
+                        frame_id,
+                        extent,
+                        buffer: frame.buffer,
+                        depth_view: frame.depth_view,
+                        present: frame.present,
+                        frustum,
+                    },
+                    paint,
+                    action,
+                )
+            }
+        };
+
         let draw = self.draw.as_mut().unwrap();
         unsafe {
-            // Wait for a frame's worth of rendering resources to become available
-            draw.wait();
-            // Get the index of the swapchain image we'll render to
-            let frame_id = loop {
-                // Check whether the window has been resized or similar
-                if self.swapchain_needs_update {
-                    // Wait for all in-flight frames to complete so we don't have a use-after-free
-                    draw.wait_idle();
-                    // Recreate the swapchain at a new size (or whatever)
-                    swapchain.update(&self.surface_fn, self.surface, self.window.inner_size());
-                    self.swapchain_needs_update = false;
-                }
-                match swapchain.acquire_next_image(draw.image_acquired()) {
-                    Ok((idx, suboptimal)) => {
-                        self.swapchain_needs_update = suboptimal;
-                        break idx;
-                    }
-                    Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                        self.swapchain_needs_update = true;
-                    }
-                    Err(e) => {
-                        panic!("acquire_next_image: {e}");
-                    }
-                }
-            };
-            let extent = swapchain.state.extent;
-            let aspect_ratio = extent.width as f32 / extent.height as f32;
-            let frame = &swapchain.state.frames[frame_id as usize];
-            let frustum = Frustum::from_vfov(f32::consts::FRAC_PI_4 * 1.2, aspect_ratio);
-            // Render the GUI
-            self.yak
-                .set_surface_size([extent.width as f32, extent.height as f32].into());
-            self.yak
-                .set_unscaled_viewport(yakui::geometry::Rect::from_pos_size(
-                    Default::default(),
-                    [extent.width as f32, extent.height as f32].into(),
-                ));
-            self.yak.start();
-            if let Some(sim) = self.sim.as_ref() {
-                self.gui_state.run(sim);
-            }
-            self.yak.finish();
-            // Render the frame
             draw.draw(
                 self.sim.as_mut(),
-                self.yak.paint(),
-                frame.buffer,
-                frame.depth_view,
-                extent,
-                frame.present,
-                &frustum,
+                paint,
+                frame_data.buffer,
+                frame_data.depth_view,
+                frame_data.extent,
+                frame_data.present,
+                &frame_data.frustum,
             );
-            // Submit the frame to be presented on the window
-            match swapchain.queue_present(frame_id) {
+        }
+
+        let swapchain = self.swapchain.as_mut().unwrap();
+        unsafe {
+            match swapchain.queue_present(frame_data.frame_id) {
                 Ok(false) => {}
                 Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     self.swapchain_needs_update = true;
                 }
                 Err(e) => panic!("queue_present: {e}"),
-            };
+            }
         }
+
+        if let Some(action) = gui_action {
+            self.handle_gui_action(action);
+        }
+    }
+
+    fn handle_gui_action(&mut self, action: GuiAction) {
+        match action {
+            GuiAction::StartSession { session, raw_config } => {
+                if self.active_session.is_some() {
+                    match Config::save_raw_config(&self.config_path, &raw_config) {
+                        Ok(()) => {
+                            self.raw_config = raw_config;
+                            self.gui_state
+                                .set_info("Configuration saved for next launch.");
+                        }
+                        Err(err) => {
+                            self.gui_state.set_error(format!(
+                                "Failed to save configuration: {}",
+                                err
+                            ));
+                        }
+                    }
+                    return;
+                }
+
+                match self.start_session(session, raw_config) {
+                    Ok(()) => {
+                        self.gui_state.mark_session_started();
+                    }
+                    Err(err) => {
+                        self.gui_state.set_error(err);
+                    }
+                }
+            }
+        }
+    }
+
+    fn start_session(&mut self, session: SessionOptions, raw_config: RawConfig) -> Result<(), String> {
+        Config::save_raw_config(&self.config_path, &raw_config)
+            .map_err(|err| format!("Failed to save configuration: {}", err))?;
+
+        let handle = match session.server {
+            Some(server_addr) => net::spawn(net::Options {
+                name: session.player_name.clone(),
+                server: server_addr,
+            }),
+            None => self.start_local_session(&session)?,
+        };
+
+        self.net = Some(handle);
+        self.active_session = Some(session);
+        self.raw_config = raw_config;
+        self.sim = None;
+        self.input = InputState::default();
+        self.last_frame = None;
+        Ok(())
+    }
+
+    fn start_local_session(&self, session: &SessionOptions) -> Result<server::Handle, String> {
+        let save_path = self.dirs.data_local_dir().join(&self.config.save);
+        if let Some(parent) = save_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("Failed to create save directory: {}", err))?;
+        }
+        let save = Save::open(&save_path, session.sim_config.chunk_size)
+            .map_err(|err| format!("Couldn't open save: {}", err))?;
+
+        info!("using save file {}", save_path.display());
+
+        let mut server = Server::new(None, session.sim_config.clone(), save)
+            .map_err(|err| format!("Failed to start server: {:#}", err))?;
+        let (handle, backend) = server::Handle::loopback();
+        let name = (*session.player_name).into();
+
+        thread::spawn(move || {
+            let runtime = Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let _guard = runtime.enter();
+            if let Err(err) = server.connect(proto::ClientHello { name }, backend) {
+                error!("failed to connect to local server: {}", err);
+                return;
+            }
+            runtime.block_on(server.run().instrument(error_span!("server")));
+            debug!("server thread terminated");
+        });
+
+        Ok(handle)
+    }
+
+    pub fn raw_config(&self) -> &RawConfig {
+        &self.raw_config
     }
 }
 
@@ -702,6 +888,8 @@ struct InputState {
     clockwise: bool,
     anticlockwise: bool,
     mouse_captured: bool,
+    // DEBUG: selected tile ID for placement (cycled with scroll wheel)
+    selected_tile_id: u16,
 }
 
 impl InputState {

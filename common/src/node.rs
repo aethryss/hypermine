@@ -1,3 +1,4 @@
+use crate::world::TILE_ID_AIR;
 /*the name of this module is pretty arbitrary at the moment*/
 
 use std::ops::{Index, IndexMut};
@@ -10,7 +11,7 @@ use crate::graph::{Graph, NodeId};
 use crate::lru_slab::SlotId;
 use crate::proto::{BlockUpdate, Position, SerializedVoxelData};
 use crate::voxel_math::{ChunkDirection, CoordAxis, CoordSign, Coords};
-use crate::world::Material;
+use crate::world::TileID;
 use crate::worldgen::NodeState;
 use crate::{Chunks, margins};
 
@@ -152,13 +153,13 @@ impl Graph {
     }
 
     /// Returns the material at the specified coordinates of the specified chunk, if the chunk is generated
-    pub fn get_material(&self, chunk_id: ChunkId, coords: Coords) -> Option<Material> {
+    pub fn get_tile_id(&self, chunk_id: ChunkId, coords: Coords) -> Option<TileID> {
         let dimension = self.layout().dimension;
 
         let Chunk::Populated { voxels, .. } = &self[chunk_id] else {
             return None;
         };
-        Some(voxels.get(coords.to_index(dimension)))
+    Some(voxels.get(coords.to_index(dimension)))
     }
 
     /// Tries to update the block at the given position to the given material.
@@ -181,7 +182,7 @@ impl Graph {
             .get_mut(block_update.coords.to_index(dimension))
             .expect("coords are in-bounds");
 
-        *voxel = block_update.new_material;
+    *voxel = block_update.new_tile_id;
         *old_surface = surface.take().or(*old_surface);
 
         for chunk_direction in ChunkDirection::iter() {
@@ -245,7 +246,7 @@ pub enum Chunk {
     /// This chunk's voxels are fully generated and ready for use.
     Populated {
         /// The voxels present in the chunk
-        voxels: VoxelData,
+    voxels: VoxelData,
 
         /// A reference to the "mesh" used to render the chunk. Set to `None` if
         /// this mesh needs to be computed or recomputed.
@@ -263,33 +264,29 @@ pub enum Chunk {
 /// The margin consists of voxels of adjacent chunks, which is a necessary extra
 /// piece of data needed to properly compute the rendered surface of the chunk.
 pub enum VoxelData {
-    /// All voxels, including the margin, are the same material. This data type
-    /// is used to save storage space and processing, since such chunks do not
-    /// need to be rendered at all.
-    // TODO: This abstraction needs some work, as it doesn't account for areas
-    // underground with a mixed set of materials, such as dirt and stone.
-    Solid(Material),
+    /// All voxels, including the margin, are the same tile type (TileID).
+    Solid(TileID),
 
-    /// This chunk (or its margins) may consist of multiple materials, which are
+    /// This chunk (or its margins) may consist of multiple tile types, which are
     /// represented in the given boxed slice.
-    Dense(Box<[Material]>),
+    Dense(Box<[TileID]>),
 }
 
 impl VoxelData {
-    pub fn data_mut(&mut self, dimension: u8) -> &mut [Material] {
+    pub fn data_mut(&mut self, dimension: u8) -> &mut [TileID] {
         match *self {
             VoxelData::Dense(ref mut d) => d,
-            VoxelData::Solid(mat) => {
-                *self = VoxelData::Dense(vec![mat; (usize::from(dimension) + 2).pow(3)].into());
+            VoxelData::Solid(tile_id) => {
+                *self = VoxelData::Dense(vec![tile_id; (usize::from(dimension) + 2).pow(3)].into());
                 self.data_mut(dimension)
             }
         }
     }
 
-    pub fn get(&self, index: usize) -> Material {
+    pub fn get(&self, index: usize) -> TileID {
         match *self {
             VoxelData::Dense(ref d) => d[index],
-            VoxelData::Solid(mat) => mat,
+            VoxelData::Solid(tile_id) => tile_id,
         }
     }
 
@@ -312,7 +309,7 @@ impl VoxelData {
             .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
 
-        let mut data = vec![Material::Void; (usize::from(dimension) + 2).pow(3)];
+    let mut data = vec![TILE_ID_AIR; (usize::from(dimension) + 2).pow(3)];
         for z in 0..dimension {
             for y in 0..dimension {
                 for x in 0..dimension {

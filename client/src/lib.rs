@@ -22,7 +22,7 @@ mod prediction;
 pub mod sim;
 mod worldgen_driver;
 
-pub use config::Config;
+pub use config::{Config, RawConfig};
 pub use sim::Sim;
 
 use loader::{Asset, Loader};

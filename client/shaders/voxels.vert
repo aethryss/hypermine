@@ -8,6 +8,7 @@ layout(location = 0) in mat4 transform;
 
 layout(location = 0) out vec3 texcoords_out;
 layout(location = 1) out float occlusion;
+layout(location = 2) out flat uint texture_index_out;
 
 layout(set = 1, binding = 0) readonly restrict buffer Surfaces {
     Surface surfaces[];
@@ -55,7 +56,8 @@ void main()  {
     uvec3 pos = get_pos(s);
     uint axis = get_axis(s);
     uvec2 uv = texcoords[axis / 3][vertex];
-    texcoords_out = vec3(uv, get_mat(s) - 1);
+    texcoords_out = vec3(uv, 0);  // Store UV coordinates, z is unused
+    texture_index_out = get_mat(s);  // Pass texture_index directly (0-255)
     occlusion = get_occlusion(s, uv);
     vec3 relative_coords = vertices[axis][vertex] + pos;
     gl_Position = view_projection * transform * vec4(relative_coords / dimension, 1);

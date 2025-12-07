@@ -20,20 +20,20 @@ use common::{
         Inventory, Position,
     },
     sanitize_motion_input,
-    world::Material,
+    world::{TILE_ID_WOOD_PLANKS, TILE_ID_GRASS, TILE_ID_DIRT, TILE_ID_SAND, TILE_ID_SNOW_BLOCK, TILE_ID_BRICK, TILE_ID_WATER, TILE_ID_LAVA, TILE_ID_AIR},
 };
 
-const MATERIAL_PALETTE: [Material; 10] = [
-    Material::WoodPlanks,
-    Material::Grass,
-    Material::Dirt,
-    Material::Sand,
-    Material::Snow,
-    Material::WhiteBrick,
-    Material::GreyBrick,
-    Material::Basalt,
-    Material::Water,
-    Material::Lava,
+const MATERIAL_PALETTE: [u16; 10] = [
+    TILE_ID_WOOD_PLANKS,
+    TILE_ID_GRASS,
+    TILE_ID_DIRT,
+    TILE_ID_SAND,
+    TILE_ID_SNOW_BLOCK,
+    TILE_ID_BRICK,
+    TILE_ID_BRICK,
+    TILE_ID_BRICK,
+    TILE_ID_WATER,
+    TILE_ID_LAVA,
 ];
 
 /// Game state
@@ -75,7 +75,7 @@ pub struct Sim {
     /// Whether the break-block button has been pressed since the last step
     break_block_pressed: bool,
 
-    selected_material: Material,
+    selected_tile: u16,
 
     prediction: PredictedMotion,
     local_character_controller: LocalCharacterController,
@@ -86,12 +86,14 @@ impl Sim {
         cfg: SimConfig,
         chunk_load_parallelism: usize,
         local_character_id: EntityId,
+        start_in_freecam: bool,
     ) -> Self {
+        let worldgen_preset = cfg.worldgen;
         let mut graph = Graph::new(cfg.chunk_size);
         graph.ensure_node_state(NodeId::ROOT);
         Self {
             graph,
-            worldgen_driver: WorldgenDriver::new(chunk_load_parallelism),
+            worldgen_driver: WorldgenDriver::new(chunk_load_parallelism, worldgen_preset),
             graph_entities: GraphEntities::new(),
             entity_ids: FxHashMap::default(),
             world: hecs::World::new(),
@@ -103,14 +105,14 @@ impl Sim {
             since_input_sent: Duration::new(0, 0),
             movement_input: na::zero(),
             average_movement_input: na::zero(),
-            no_clip: true,
+            no_clip: start_in_freecam,
             toggle_no_clip: false,
             is_jumping: false,
             jump_pressed: false,
             jump_held: false,
             place_block_pressed: false,
             break_block_pressed: false,
-            selected_material: Material::WoodPlanks,
+            selected_tile: TILE_ID_WOOD_PLANKS,
             prediction: PredictedMotion::new(proto::Position {
                 node: NodeId::ROOT,
                 local: MIsometry::identity(),
@@ -162,18 +164,22 @@ impl Sim {
         self.place_block_pressed = true;
     }
 
-    pub fn select_material(&mut self, idx: usize) {
-        self.selected_material = *MATERIAL_PALETTE.get(idx).unwrap_or(&MATERIAL_PALETTE[0]);
+    pub fn select_tile(&mut self, idx: usize) {
+        self.selected_tile = *MATERIAL_PALETTE.get(idx).unwrap_or(&MATERIAL_PALETTE[0]);
     }
 
-    pub fn selected_material(&self) -> Material {
-        self.selected_material
+    pub fn select_tile_by_id(&mut self, tile_id: u16) {
+        self.selected_tile = tile_id;
+    }
+
+    pub fn selected_tile(&self) -> u16 {
+        self.selected_tile
     }
 
     /// Returns an EntityId in the inventory with the given material
-    pub fn get_any_inventory_entity_matching_material(
+    pub fn get_any_inventory_entity_matching_tile(
         &self,
-        material: Material,
+        tile_id: u16,
     ) -> Option<EntityId> {
         self.world
             .get::<&Inventory>(self.local_character?)
@@ -184,14 +190,14 @@ impl Sim {
             .find(|e| {
                 self.entity_ids.get(e).is_some_and(|&entity| {
                     self.world
-                        .get::<&Material>(entity)
-                        .is_ok_and(|m| *m == material)
+                        .get::<&u16>(entity)
+                        .is_ok_and(|m| *m == tile_id)
                 })
             })
     }
 
     /// Returns the number of entities in the inventory with the given material
-    pub fn count_inventory_entities_matching_material(&self, material: Material) -> usize {
+    pub fn count_inventory_entities_matching_tile(&self, tile_id: u16) -> usize {
         let Some(local_character) = self.local_character else {
             return 0;
         };
@@ -205,8 +211,8 @@ impl Sim {
             .filter(|e| {
                 self.entity_ids.get(e).is_some_and(|&entity| {
                     self.world
-                        .get::<&Material>(entity)
-                        .is_ok_and(|m| *m == material)
+                        .get::<&u16>(entity)
+                        .is_ok_and(|m| *m == tile_id)
                 })
             })
             .count()
@@ -436,7 +442,7 @@ impl Sim {
                 Inventory(x) => {
                     builder.add(x);
                 }
-                Material(x) => {
+                Component::TileID(x) => {
                     builder.add(x);
                 }
             };
@@ -519,8 +525,9 @@ impl Sim {
     pub fn view(&self) -> Position {
         let mut pos = self.local_character_controller.oriented_position();
         let up = self.graph.get_relative_up(&pos).unwrap();
+        // Position camera at eye height (ClassiCube: 1.625 blocks above feet)
         pos.local *= MIsometry::translation_along(
-            &(up.as_ref() * (self.cfg.character.character_radius - 1e-3)),
+            &(up.as_ref() * self.cfg.character.eye_height),
         );
         pos
     }
@@ -582,13 +589,13 @@ impl Sim {
         };
 
         let material = if placing {
-            self.selected_material
+            self.selected_tile
         } else {
-            Material::Void
+            TILE_ID_AIR
         };
 
         let consumed_entity = if placing && self.cfg.gameplay_enabled {
-            Some(self.get_any_inventory_entity_matching_material(material)?)
+            Some(self.get_any_inventory_entity_matching_tile(material)?)
         } else {
             None
         };
@@ -596,7 +603,7 @@ impl Sim {
         Some(BlockUpdate {
             chunk_id: block_pos.0,
             coords: block_pos.1,
-            new_material: material,
+            new_tile_id: material,
             consumed_entity,
         })
     }

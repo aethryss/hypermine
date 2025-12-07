@@ -7,6 +7,7 @@ use common::{
     node::{Chunk, ChunkId, VoxelData},
     proto::{BlockUpdate, Position},
     traversal,
+    worldgen::WorldgenPreset,
 };
 use fxhash::FxHashMap;
 use metrics::histogram;
@@ -18,14 +19,16 @@ pub struct WorldgenDriver {
     preloaded_block_updates: FxHashMap<ChunkId, Vec<BlockUpdate>>,
     /// Voxel data that has been fetched from the server but not yet introduced to the graph
     preloaded_voxel_data: FxHashMap<ChunkId, VoxelData>,
+    preset: WorldgenPreset,
 }
 
 impl WorldgenDriver {
-    pub fn new(chunk_load_parallelism: usize) -> Self {
+    pub fn new(chunk_load_parallelism: usize, preset: WorldgenPreset) -> Self {
         Self {
             work_queue: WorkQueue::new(chunk_load_parallelism),
             preloaded_block_updates: FxHashMap::default(),
             preloaded_voxel_data: FxHashMap::default(),
+            preset,
         }
     }
 
@@ -68,7 +71,14 @@ impl WorldgenDriver {
                 let params = common::worldgen::ChunkParams::new(graph, chunk_id);
                 if let Some(voxel_data) = self.preloaded_voxel_data.remove(&chunk_id) {
                     self.add_chunk_to_graph(graph, chunk_id, voxel_data);
-                } else if self.work_queue.load(ChunkDesc { node, params }) {
+                } else if self
+                    .work_queue
+                    .load(ChunkDesc {
+                        node,
+                        params,
+                        preset: self.preset,
+                    })
+                {
                     graph[chunk_id] = Chunk::Generating;
                 } else {
                     // No capacity is available in the work queue. Stop trying to prepare chunks to generate.
@@ -124,6 +134,7 @@ impl WorldgenDriver {
 struct ChunkDesc {
     node: NodeId,
     params: common::worldgen::ChunkParams,
+    preset: WorldgenPreset,
 }
 
 struct LoadedChunk {

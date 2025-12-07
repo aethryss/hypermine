@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{dodeca, math::MVector};
+use crate::{dodeca, math::MVector, worldgen::WorldgenPreset};
 
 /// Manually specified simulation config parameters
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SimConfigRaw {
     /// Number of steps per second
@@ -21,6 +21,8 @@ pub struct SimConfigRaw {
     pub gameplay_enabled: Option<bool>,
     /// Number of voxels along the edge of a chunk
     pub chunk_size: Option<u8>,
+    #[serde(default)]
+    pub worldgen: WorldgenPreset,
     /// Approximate length of the edge of a voxel in meters
     ///
     /// Curved spaces have a notion of absolute distance, defined with respect to the curvature. We
@@ -51,6 +53,8 @@ pub struct SimConfig {
     pub gameplay_enabled: bool,
     /// Number of voxels along the edge of a chunk
     pub chunk_size: u8,
+    /// World generation preset controlling how new chunks are populated
+    pub worldgen: WorldgenPreset,
     /// Static configuration information relevant to character physics
     pub character: CharacterConfig,
     /// Scaling factor converting meters to absolute units
@@ -59,7 +63,7 @@ pub struct SimConfig {
 
 impl SimConfig {
     pub fn from_raw(x: &SimConfigRaw) -> Self {
-        let chunk_size = x.chunk_size.unwrap_or(12);
+        let chunk_size = x.chunk_size.unwrap_or(16);
         let voxel_size = x.voxel_size.unwrap_or(1.0);
         let meters_to_absolute = meters_to_absolute(chunk_size, voxel_size);
         SimConfig {
@@ -71,6 +75,7 @@ impl SimConfig {
             input_queue_size: Duration::from_millis(x.input_queue_size_ms.unwrap_or(50).into()),
             gameplay_enabled: x.gameplay_enabled.unwrap_or(false),
             chunk_size,
+            worldgen: x.worldgen,
             character: CharacterConfig::from_raw(&x.character, meters_to_absolute),
             meters_to_absolute,
         }
@@ -106,14 +111,23 @@ pub struct CharacterConfigRaw {
     pub air_acceleration: Option<f32>,
     /// Acceleration of gravity in m/s^2
     pub gravity_acceleration: Option<f32>,
-    /// Air resistance in (m/s^2) per (m/s); scales linearly with respect to speed
-    pub air_resistance: Option<f32>,
+    /// Air resistance/drag multiplier (0-1, applied per tick)
+    pub air_drag: Option<f32>,
+    /// Ground friction multiplier (0-1, applied when on ground)
+    pub ground_friction: Option<f32>,
     /// How fast the player jumps off the ground in m/s
     pub jump_speed: Option<f32>,
     /// How far away the player needs to be from the ground in meters to be considered in the air in meters
     pub ground_distance_tolerance: Option<f32>,
-    /// Radius of the character in meters
+    /// Collision radius of the character in meters (horizontal half-width)
+    /// ClassiCube: 8.6/16 / 2 = 0.269 blocks
     pub character_radius: Option<f32>,
+    /// Height of the character's collision box in meters
+    /// ClassiCube: 28.1/16 = 1.756 blocks
+    pub character_height: Option<f32>,
+    /// Eye/camera height above feet in meters
+    /// ClassiCube: 26/16 = 1.625 blocks
+    pub eye_height: Option<f32>,
     /// How far a character can reach when placing blocks in meters
     pub block_reach: Option<f32>,
 }
@@ -136,34 +150,70 @@ pub struct CharacterConfig {
     pub air_acceleration: f32,
     /// Acceleration of gravity in units/s^2
     pub gravity_acceleration: f32,
-    /// Air resistance in (units/s^2) per (units/s); scales linearly with respect to speed
-    pub air_resistance: f32,
+    /// Air drag multiplier (ClassiCube: 0.98 vertical, 0.91 horizontal)
+    pub air_drag: f32,
+    /// Ground friction multiplier (ClassiCube: 0.6 horizontal)
+    pub ground_friction: f32,
     /// How fast the player jumps off the ground in units/s
     pub jump_speed: f32,
     /// How far away the player needs to be from the ground in meters to be considered in the air in absolute units
     pub ground_distance_tolerance: f32,
-    /// Radius of the character in absolute units
+    /// Collision radius of the character in absolute units (horizontal half-width for sphere approximation)
     pub character_radius: f32,
+    /// Height of the character's collision box in absolute units
+    pub character_height: f32,
+    /// Eye/camera height above feet in absolute units
+    pub eye_height: f32,
     /// How far a character can reach when placing blocks in absolute units
     pub block_reach: f32,
 }
 
 impl CharacterConfig {
     pub fn from_raw(x: &CharacterConfigRaw, meters_to_absolute: f32) -> Self {
+        // ClassiCube physics constants (converted from per-tick at 20 ticks/sec to per-second):
+        // 
+        // Player dimensions (from Model.c HumanModel):
+        // - Collision Size: (8.6, 28.1, 8.6) in 1/16ths = (0.5375, 1.756, 0.5375) blocks
+        // - Eye height: 26/16 = 1.625 blocks
+        // - AABB bounds: (-8,0,-4) to (8,32,4) in 1/16ths (visual model)
+        //
+        // Physics (from EntityComponents.c):
+        // - gravity = 0.08 per tick at 20 ticks/sec
+        // - jumpVel = 0.42 blocks/tick = 8.4 m/s initial velocity
+        // - ground speed factor = 0.1, air factor = 0.02
+        // - drag = 0.91 horizontal, 0.98 vertical per tick
+        // - ground friction = 0.6 per tick
         CharacterConfig {
             no_clip_movement_speed: x.no_clip_movement_speed.unwrap_or(12.0) * meters_to_absolute,
-            max_ground_speed: x.max_ground_speed.unwrap_or(4.0) * meters_to_absolute,
+            // ClassiCube max ground speed is approximately 4.3 m/s with standard settings
+            max_ground_speed: x.max_ground_speed.unwrap_or(4.317) * meters_to_absolute,
             speed_cap: x.speed_cap.unwrap_or(30.0) * meters_to_absolute,
             max_ground_slope: x.max_ground_slope.unwrap_or(1.73), // 60 degrees
-            ground_acceleration: x.ground_acceleration.unwrap_or(20.0) * meters_to_absolute,
-            air_acceleration: x.air_acceleration.unwrap_or(2.0) * meters_to_absolute,
-            gravity_acceleration: x.gravity_acceleration.unwrap_or(20.0) * meters_to_absolute,
-            air_resistance: x.air_resistance.unwrap_or(0.2),
-            jump_speed: x.jump_speed.unwrap_or(8.0) * meters_to_absolute,
+            // ClassiCube: ground factor 0.1, scaled for continuous physics
+            ground_acceleration: x.ground_acceleration.unwrap_or(50.0) * meters_to_absolute,
+            // ClassiCube: air factor 0.02 = 1/5 of ground = much less air control
+            air_acceleration: x.air_acceleration.unwrap_or(10.0) * meters_to_absolute,
+            // ClassiCube: gravity 0.08 * 20 ticks/sec = 1.6 m/tick² -> ~32 m/s² 
+            // but feels like ~20 m/s² in practice due to drag
+            gravity_acceleration: x.gravity_acceleration.unwrap_or(28.0) * meters_to_absolute,
+            // ClassiCube: drag 0.91 horizontal per tick at 20 ticks = 0.91^20 ≈ 0.15 per second
+            // We'll use exponential decay: e^(-k*t) where k gives similar feel
+            air_drag: x.air_drag.unwrap_or(1.9), // ~0.15 remaining after 1 second
+            // ClassiCube: ground friction 0.6 per tick = 0.6^20 ≈ 3.6e-5 per second
+            // Very strong friction when on ground
+            ground_friction: x.ground_friction.unwrap_or(10.0),
+            // ClassiCube: jumpVel = 0.42 blocks/tick = 8.4 m/s
+            jump_speed: x.jump_speed.unwrap_or(8.4) * meters_to_absolute,
             ground_distance_tolerance: x.ground_distance_tolerance.unwrap_or(0.2)
                 * meters_to_absolute,
-            character_radius: x.character_radius.unwrap_or(0.4) * meters_to_absolute,
-            block_reach: x.block_reach.unwrap_or(10.0) * meters_to_absolute,
+            // ClassiCube: collision half-width = 8.6/16/2 = 0.269 blocks
+            // Using slightly larger for sphere approximation of box collider
+            character_radius: x.character_radius.unwrap_or(0.269) * meters_to_absolute,
+            // ClassiCube: collision height = 28.1/16 = 1.756 blocks
+            character_height: x.character_height.unwrap_or(1.756) * meters_to_absolute,
+            // ClassiCube: eye height = 26/16 = 1.625 blocks
+            eye_height: x.eye_height.unwrap_or(1.625) * meters_to_absolute,
+            block_reach: x.block_reach.unwrap_or(5.0) * meters_to_absolute,
         }
     }
 }

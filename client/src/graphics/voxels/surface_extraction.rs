@@ -6,7 +6,7 @@ use lahar::{DedicatedBuffer, DedicatedMapping};
 use vk_shader_macros::include_glsl;
 
 use crate::graphics::{Base, VkDrawIndirectCommand, as_bytes};
-use common::{defer, world::Material};
+use common::{defer, world::{TileID, TILE_REGISTRY}};
 
 const EXTRACT: &[u32] = include_glsl!("shaders/surface-extraction/extract.comp", target: vulkan1_1);
 
@@ -27,6 +27,13 @@ impl SurfaceExtraction {
                     &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[
                         vk::DescriptorSetLayoutBinding {
                             binding: 0,
+                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            ..Default::default()
+                        },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 1,
                             descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
                             descriptor_count: 1,
                             stage_flags: vk::ShaderStageFlags::COMPUTE,
@@ -159,11 +166,12 @@ impl SurfaceExtraction {
 pub struct ScratchBuffer {
     dimension: u32,
     params: DedicatedBuffer,
+    texture_indices: DedicatedMapping<[u32]>,  // Maps TileID to texture_index
     /// Size of a single entry in the voxel buffer
     voxel_buffer_unit: vk::DeviceSize,
     /// Size of a single entry in the state buffer
     state_buffer_unit: vk::DeviceSize,
-    voxels_staging: DedicatedMapping<[Material]>,
+    voxels_staging: DedicatedMapping<[TileID]>,
     voxels: DedicatedBuffer,
     state: DedicatedBuffer,
     descriptor_pool: vk::DescriptorPool,
@@ -178,7 +186,7 @@ impl ScratchBuffer {
         let device = &*gfx.device;
         // Padded by 2 on each dimension so each voxel of interest has a full neighborhood
         let voxel_buffer_unit = round_up(
-            mem::size_of::<Material>() as vk::DeviceSize * (dimension as vk::DeviceSize + 2).pow(3),
+            mem::size_of::<TileID>() as vk::DeviceSize * (dimension as vk::DeviceSize + 2).pow(3),
             // Pad at least to multiples of 4 so the shaders can safely read in 32 bit units
             gfx.limits.min_storage_buffer_offset_alignment.max(4),
         );
@@ -199,11 +207,35 @@ impl ScratchBuffer {
             );
             gfx.set_name(params.handle, cstr!("surface extraction params"));
 
+            // Create texture_indices lookup buffer (TileID to texture_index mapping)
+            let mut texture_indices_data = [0u32; 256];
+            for (tile_id, tile) in TILE_REGISTRY.iter().enumerate() {
+                if tile.id as usize != tile_id {
+                    eprintln!(
+                        "ERROR: TILE_REGISTRY entry at index {} has id {}, but expected {}",
+                        tile_id, tile.id, tile_id
+                    );
+                }
+                texture_indices_data[tile_id] = tile.texture_index as u32;
+            }
+            
+            let mut texture_indices = DedicatedMapping::<[u32]>::zeroed_array(
+                device,
+                &gfx.memory_properties,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                256,
+            );
+            // Copy data into the mapped memory
+            for (i, &val) in texture_indices_data.iter().enumerate() {
+                texture_indices[i] = val;
+            }
+            gfx.set_name(texture_indices.buffer(), cstr!("texture indices"));
+
             let voxels_staging = DedicatedMapping::zeroed_array(
                 device,
                 &gfx.memory_properties,
                 vk::BufferUsageFlags::TRANSFER_SRC,
-                (voxels_size / mem::size_of::<Material>() as vk::DeviceSize) as usize,
+                (voxels_size / mem::size_of::<TileID>() as vk::DeviceSize) as usize,
             );
             gfx.set_name(voxels_staging.buffer(), cstr!("voxels staging"));
 
@@ -240,7 +272,7 @@ impl ScratchBuffer {
                         .pool_sizes(&[
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                                descriptor_count: 1,
+                                descriptor_count: 2,  // params + texture_indices
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::STORAGE_BUFFER,
@@ -263,21 +295,33 @@ impl ScratchBuffer {
 
             let params_ds = descriptor_sets.pop().unwrap();
             device.update_descriptor_sets(
-                &[vk::WriteDescriptorSet::default()
-                    .dst_set(params_ds)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(&[vk::DescriptorBufferInfo {
-                        buffer: params.handle,
-                        offset: 0,
-                        range: vk::WHOLE_SIZE,
-                    }])],
+                &[
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(params_ds)
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .buffer_info(&[vk::DescriptorBufferInfo {
+                            buffer: params.handle,
+                            offset: 0,
+                            range: vk::WHOLE_SIZE,
+                        }]),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(params_ds)
+                        .dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .buffer_info(&[vk::DescriptorBufferInfo {
+                            buffer: texture_indices.buffer(),
+                            offset: 0,
+                            range: vk::WHOLE_SIZE,
+                        }]),
+                ],
                 &[],
             );
 
             Self {
                 dimension,
                 params,
+                texture_indices,
                 voxel_buffer_unit,
                 state_buffer_unit,
                 voxels_staging,
@@ -305,8 +349,8 @@ impl ScratchBuffer {
     }
 
     /// Includes a one-voxel margin around the entire volume
-    pub fn storage(&mut self, index: u32) -> &mut [Material] {
-        let start = index as usize * (self.voxel_buffer_unit as usize / mem::size_of::<Material>());
+    pub fn storage(&mut self, index: u32) -> &mut [TileID] {
+        let start = index as usize * (self.voxel_buffer_unit as usize / mem::size_of::<TileID>());
         let length = (self.dimension + 2).pow(3) as usize;
         &mut self.voxels_staging[start..start + length]
     }
@@ -372,7 +416,7 @@ impl ScratchBuffer {
 
             let voxel_count = (self.dimension + 2).pow(3) as usize;
             let voxels_range =
-                voxel_count as vk::DeviceSize * mem::size_of::<Material>() as vk::DeviceSize;
+                voxel_count as vk::DeviceSize * mem::size_of::<TileID>() as vk::DeviceSize;
             let max_faces = 3 * (self.dimension.pow(3) + self.dimension.pow(2));
             let dispatch = dispatch_sizes(self.dimension);
             device.cmd_bind_descriptor_sets(
@@ -519,6 +563,7 @@ impl ScratchBuffer {
         unsafe {
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             self.params.destroy(device);
+            self.texture_indices.destroy(device);
             self.voxels_staging.destroy(device);
             self.voxels.destroy(device);
             self.state.destroy(device);

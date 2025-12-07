@@ -88,7 +88,7 @@ impl Loader {
                             descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                             descriptor_count: 1,
                             stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                            p_immutable_samplers: &gfx.linear_sampler,
+                            p_immutable_samplers: std::ptr::null(),
                             ..vk::DescriptorSetLayoutBinding::default()
                         },
                     ]),

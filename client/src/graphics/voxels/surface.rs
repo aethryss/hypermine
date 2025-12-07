@@ -4,7 +4,7 @@ use vk_shader_macros::include_glsl;
 
 use super::surface_extraction::DrawBuffer;
 use crate::{Asset, Loader, graphics::Base};
-use common::{defer, world::Material};
+use common::defer;
 
 const VERT: &[u32] = include_glsl!("shaders/voxels.vert");
 const FRAG: &[u32] = include_glsl!("shaders/voxels.frag");
@@ -17,6 +17,7 @@ pub struct Surface {
     ds: vk::DescriptorSet,
     colors: Asset<DedicatedImage>,
     colors_view: vk::ImageView,
+    linear_sampler: vk::Sampler,
 }
 
 impl Surface {
@@ -50,7 +51,6 @@ impl Surface {
                             descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                             descriptor_count: 1,
                             stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                            p_immutable_samplers: &gfx.linear_sampler,
                             ..Default::default()
                         },
                     ]),
@@ -225,10 +225,9 @@ impl Surface {
             f_guard.invoke();
 
             let colors = loader.load(
-                "voxel materials",
-                crate::graphics::PngArray {
-                    path: "materials".into(),
-                    size: common::world::Material::COUNT - 1,
+                "terrain atlas",
+                crate::graphics::Png {
+                    path: "materials/terrain.png".into(),
                 },
             );
 
@@ -240,6 +239,7 @@ impl Surface {
                 ds,
                 colors,
                 colors_view: vk::ImageView::null(),
+                linear_sampler: gfx.linear_sampler,
             }
         }
     }
@@ -260,14 +260,14 @@ impl Surface {
                         .create_image_view(
                             &vk::ImageViewCreateInfo::default()
                                 .image(colors.handle)
-                                .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+                                .view_type(vk::ImageViewType::TYPE_2D)
                                 .format(vk::Format::R8G8B8A8_SRGB)
                                 .subresource_range(vk::ImageSubresourceRange {
                                     aspect_mask: vk::ImageAspectFlags::COLOR,
                                     base_mip_level: 0,
                                     level_count: 1,
                                     base_array_layer: 0,
-                                    layer_count: (Material::COUNT - 1) as u32,
+                                    layer_count: 1,
                                 }),
                             None,
                         )
@@ -278,7 +278,7 @@ impl Surface {
                             .dst_binding(1)
                             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                             .image_info(&[vk::DescriptorImageInfo {
-                                sampler: vk::Sampler::null(),
+                                sampler: self.linear_sampler,
                                 image_view: self.colors_view,
                                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                             }])],

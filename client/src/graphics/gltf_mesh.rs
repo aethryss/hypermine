@@ -182,7 +182,7 @@ async fn load_primitive(
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(&[vk::DescriptorImageInfo {
-                    sampler: vk::Sampler::null(),
+                    sampler: ctx.gfx.linear_sampler,
                     image_view: color_view,
                     image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 }])],

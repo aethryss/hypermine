@@ -6,7 +6,7 @@ use renderdoc::{RenderDoc, V110};
 
 use super::{SurfaceExtraction, surface_extraction};
 use crate::graphics::{Base, VkDrawIndirectCommand};
-use common::world::Material;
+use common::world::TileID;
 
 struct SurfaceExtractionTest {
     gfx: Arc<Base>,
@@ -141,8 +141,7 @@ struct Surface {
     y: u8,
     z: u8,
     axis: u8,
-    mat: Material,
-    _padding: u8,
+    mat: u16,  // texture_index instead of Material
     occlusion: u8,
 }
 
@@ -155,7 +154,7 @@ fn surface_extraction() {
     let mut test = SurfaceExtractionTest::new();
 
     for x in test.scratch.storage(0) {
-        *x = Material::Void;
+        *x = 0; // TILE_ID_AIR
     }
 
     test.run();
@@ -166,7 +165,7 @@ fn surface_extraction() {
     );
 
     for x in test.scratch.storage(0) {
-        *x = Material::Dirt;
+        *x = 3; // TILE_ID_DIRT
     }
 
     test.run();
@@ -178,12 +177,12 @@ fn surface_extraction() {
 
     let storage = test.scratch.storage(0);
     for x in &mut *storage {
-        *x = Material::Void;
+        *x = 0; // TILE_ID_AIR
     }
     for z in 0..((DIMENSION + 2) / 2) {
         for y in 0..(DIMENSION + 2) {
             for x in 0..(DIMENSION + 2) {
-                storage[x + y * (DIMENSION + 2) + z * (DIMENSION + 2).pow(2)] = Material::Dirt;
+                storage[x + y * (DIMENSION + 2) + z * (DIMENSION + 2).pow(2)] = 3; // TILE_ID_DIRT
             }
         }
     }
@@ -202,8 +201,7 @@ fn surface_extraction() {
             y: 0,
             z: 1,
             axis: 5,
-            mat: Material::Dirt,
-            _padding: 0,
+            mat: 2,  // texture_index for Dirt
             occlusion: 0xFF,
         },
         Surface {
@@ -211,8 +209,7 @@ fn surface_extraction() {
             y: 0,
             z: 1,
             axis: 5,
-            mat: Material::Dirt,
-            _padding: 0,
+            mat: 2,  // texture_index for Dirt
             occlusion: 0xFF,
         },
         Surface {
@@ -220,8 +217,7 @@ fn surface_extraction() {
             y: 1,
             z: 1,
             axis: 5,
-            mat: Material::Dirt,
-            _padding: 0,
+            mat: 2,  // texture_index for Dirt
             occlusion: 0xFF,
         },
         Surface {
@@ -229,8 +225,7 @@ fn surface_extraction() {
             y: 1,
             z: 1,
             axis: 5,
-            mat: Material::Dirt,
-            _padding: 0,
+            mat: 2,  // texture_index for Dirt
             occlusion: 0xFF,
         },
     ] {

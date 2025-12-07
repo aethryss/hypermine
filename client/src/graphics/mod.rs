@@ -8,6 +8,7 @@ mod frustum;
 mod gltf_mesh;
 mod gui;
 mod meshes;
+mod png;
 mod png_array;
 pub mod voxels;
 mod window;
@@ -23,6 +24,7 @@ pub use self::{
     frustum::Frustum,
     gltf_mesh::{GlbFile, GltfScene},
     meshes::{Mesh, Meshes},
+    png::Png,
     png_array::PngArray,
     voxels::Voxels,
     window::{EarlyWindow, Window},

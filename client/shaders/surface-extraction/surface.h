@@ -5,7 +5,8 @@
 struct Surface {
     // From most to least significant byte, (axis, z, y, x)
     uint pos_axis;
-    // From most to least significant byte, (occlusion, <padding>, mat, mat)
+    // From most to least significant byte, (occlusion, <padding>, texture_index, texture_index)
+    // Now stores texture_index (0-255) instead of material
     uint occlusion_mat;
 };
 

@@ -4,7 +4,7 @@ use crate::{
     math::PermuteXYZ,
     node::{Chunk, ChunkId, VoxelData},
     voxel_math::{ChunkAxisPermutation, ChunkDirection, CoordAxis, CoordSign, Coords},
-    world::Material,
+    world::TileID,
 };
 
 /// Updates the margins of both `voxels` and `neighbor_voxels` at the side they meet at.
@@ -25,7 +25,7 @@ pub fn fix_margins(
     // If two solid chunks are both void or both non-void, do nothing.
     if voxels.is_solid()
         && neighbor_voxels.is_solid()
-        && (voxels.get(0) == Material::Void) == (neighbor_voxels.get(0) == Material::Void)
+        && (voxels.get(0) == 0) == (neighbor_voxels.get(0) == 0)
     {
         return;
     }
@@ -43,11 +43,11 @@ pub fn fix_margins(
     ] {
         // Check that dense_voxels is indeed dense and solid_voxels is indeed solid
         if !dense_voxels.is_solid() && solid_voxels.is_solid() {
-            let solid_voxels_is_void = solid_voxels.get(0) == Material::Void;
+            let solid_voxels_is_void = solid_voxels.get(0) == 0;
             // Check that the face of dense_voxels that meets solid_voxels matches. If it does,
             // skip the margin reconciliation stage.
             if all_voxels_at_face(dimension, dense_voxels, dense_to_solid_direction, |m| {
-                (m == Material::Void) == solid_voxels_is_void
+                (m == 0) == solid_voxels_is_void
             }) {
                 return;
             }
@@ -85,7 +85,7 @@ fn all_voxels_at_face(
     dimension: u8,
     voxels: &VoxelData,
     direction: ChunkDirection,
-    f: impl Fn(Material) -> bool,
+    f: impl Fn(TileID) -> bool,
 ) -> bool {
     let boundary_coord = CoordsWithMargins::boundary_coord(dimension, direction.sign);
     for j in 0..dimension {

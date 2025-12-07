@@ -2,13 +2,18 @@
 
 #extension GL_KHR_shader_subgroup_ballot: enable
 #extension GL_KHR_shader_subgroup_arithmetic: enable
+#extension GL_EXT_scalar_block_layout: enable
 
 #include "surface.h"
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
-layout(set = 0, binding = 0) restrict uniform Parameters {
+layout(set = 0, binding = 0, std430) restrict uniform Parameters {
     int dimension;
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly uniform TextureIndices {
+    uint texture_index[256];  // Maps TileID (0-255) to texture index (0-255)
 };
 
 layout(set = 1, binding = 0) readonly restrict buffer Voxels {
@@ -75,7 +80,8 @@ bool find_face(out Face info) {
     uint self_mat = get_voxel(info.voxel);
     // Flip face around if the neighbor is the solid one
     info.inward = self_mat == 0;
-    info.material = self_mat | neighbor_mat;
+    // Use texture_index from the non-air voxel
+    info.material = (self_mat != 0) ? texture_index[self_mat] : texture_index[neighbor_mat];
     // If self or neighbor is a void margin, then no surface should be generated, as any surface
     // that would be rendered is the responsibility of the adjacent chunk.
     if ((self_mat == 0 && info.voxel[info.axis] == dimension) || (neighbor_mat == 0 && neighbor[info.axis] == -1)) return false;

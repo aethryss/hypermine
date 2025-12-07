@@ -5,7 +5,7 @@ use common::dodeca::{Side, Vertex};
 use common::math::MIsometry;
 use common::node::VoxelData;
 use common::proto::{BlockUpdate, Inventory, SerializedVoxelData};
-use common::world::Material;
+use common::world::TILE_ID_AIR;
 use common::{GraphEntities, node::ChunkId};
 use fxhash::{FxHashMap, FxHashSet};
 use hecs::{DynamicBundle, Entity, EntityBuilder};
@@ -214,11 +214,11 @@ impl Sim {
                 }));
             }
             ComponentType::Material => {
-                let material: u16 =
+                let tile_id: u16 =
                     u16::from_le_bytes(component_bytes.try_into().map_err(|_| {
-                        anyhow::anyhow!("Expected Material component in save file to be 2 bytes")
+                        anyhow::anyhow!("Expected TileID component in save file to be 2 bytes")
                     })?);
-                entity_builder.add(Material::try_from(material)?);
+                entity_builder.add(tile_id);
             }
             ComponentType::Inventory => {
                 let mut contents = vec![];
@@ -280,10 +280,10 @@ impl Sim {
             }) {
                 components.push((ComponentType::Name as u64, ch.name.as_bytes().into()));
             }
-            if let Some(material) = entity.get::<&Material>() {
+            if let Some(tile_id) = entity.get::<&u16>() {
                 components.push((
                     ComponentType::Material as u64,
-                    (*material as u16).to_le_bytes().into(),
+                    (*tile_id as u16).to_le_bytes().into(),
                 ));
             }
             if let Some(inventory) = entity.get::<&Inventory>() {
@@ -510,7 +510,10 @@ impl Sim {
                         self.graph.populate_chunk(chunk, voxel_data);
                     } else {
                         let params = ChunkParams::new(&mut self.graph, chunk);
-                        self.graph.populate_chunk(chunk, params.generate_voxels());
+                        self.graph.populate_chunk(
+                            chunk,
+                            params.generate_voxels(),
+                        );
                     }
                 }
             }
@@ -664,15 +667,15 @@ impl Sim {
             .world
             .get::<&NodeId>(*self.entity_ids.get(&subject).unwrap())
             .unwrap();
-        let Some(old_material) = self
+        let Some(old_tile_id) = self
             .graph
-            .get_material(block_update.chunk_id, block_update.coords)
+            .get_tile_id(block_update.chunk_id, block_update.coords)
         else {
             tracing::warn!("Block update received from ungenerated chunk");
             return;
         };
         if self.cfg.gameplay_enabled {
-            if block_update.new_material != Material::Void {
+            if block_update.new_tile_id != TILE_ID_AIR {
                 let Some(consumed_entity_id) = block_update.consumed_entity else {
                     tracing::warn!("Tried to place block without consuming any entities");
                     return;
@@ -683,8 +686,8 @@ impl Sim {
                 };
                 if !self
                     .world
-                    .get::<&Material>(consumed_entity)
-                    .is_ok_and(|m| *m == block_update.new_material)
+                    .get::<&u16>(consumed_entity)
+                    .is_ok_and(|m| *m == block_update.new_tile_id)
                 {
                     tracing::warn!("Tried to consume wrong material");
                     return;
@@ -695,8 +698,8 @@ impl Sim {
                 }
                 self.destroy(consumed_entity);
             }
-            if old_material != Material::Void {
-                let (produced_entity, _) = self.spawn((subject_node, old_material));
+            if old_tile_id != TILE_ID_AIR {
+                let (produced_entity, _) = self.spawn((subject_node, old_tile_id));
                 self.add_to_inventory(subject, produced_entity);
             }
         }
@@ -723,8 +726,8 @@ fn dump_entity(world: &hecs::World, entity: Entity) -> Vec<Component> {
     if let Ok(x) = world.get::<&Inventory>(entity) {
         components.push(Component::Inventory((*x).clone()));
     }
-    if let Ok(x) = world.get::<&Material>(entity) {
-        components.push(Component::Material(*x));
+    if let Ok(x) = world.get::<&u16>(entity) {
+        components.push(Component::TileID(*x));
     }
     components
 }

@@ -1,12 +1,8 @@
-use std::{sync::Arc, thread};
+use std::sync::Arc;
 
-use client::{Config, graphics, metrics, net};
-use common::proto;
-use save::Save;
+use client::{graphics, metrics, Config, RawConfig};
 
 use ash::khr;
-use server::Server;
-use tracing::{Instrument, debug, error, error_span, info};
 use winit::{
     application::ApplicationHandler,
     event_loop::{ActiveEventLoop, EventLoop},
@@ -17,59 +13,16 @@ fn main() {
     common::init_tracing();
     let metrics = crate::metrics::init();
 
-    let dirs = directories::ProjectDirs::from("", "", "hypermine").unwrap();
-    let config = Arc::new(Config::load(&dirs));
+    let dirs = Arc::new(directories::ProjectDirs::from("", "", "hypermine").unwrap());
+    let (config, raw_config) = Config::load_with_raw(&dirs);
+    let config = Arc::new(config);
 
-    let net = match config.server {
-        None => {
-            // spawn an in-process server
-            let sim_cfg = config.local_simulation.clone();
-
-            let save = dirs.data_local_dir().join(&config.save);
-            info!("using save file {}", save.display());
-            std::fs::create_dir_all(save.parent().unwrap()).unwrap();
-            let save = match Save::open(&save, config.local_simulation.chunk_size) {
-                Ok(x) => x,
-                Err(e) => {
-                    error!("couldn't open save: {}", e);
-                    return;
-                }
-            };
-
-            let mut server = match Server::new(None, sim_cfg, save) {
-                Ok(server) => server,
-                Err(e) => {
-                    eprintln!("{e:#}");
-                    std::process::exit(1);
-                }
-            };
-
-            let (handle, backend) = server::Handle::loopback();
-            let name = (*config.name).into();
-
-            thread::spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .build()
-                    .unwrap();
-                let _guard = runtime.enter();
-                server
-                    .connect(proto::ClientHello { name }, backend)
-                    .unwrap();
-                runtime.block_on(server.run().instrument(error_span!("server")));
-                debug!("server thread terminated");
-            });
-
-            handle
-        }
-        Some(_) => net::spawn(config.clone()),
-    };
     let mut app = App {
         config,
         dirs,
         metrics,
         window: None,
-        net: Some(net),
+        raw_config,
     };
 
     let event_loop = EventLoop::new().unwrap();
@@ -79,10 +32,10 @@ fn main() {
 
 struct App {
     config: Arc<Config>,
-    dirs: directories::ProjectDirs,
+    dirs: Arc<directories::ProjectDirs>,
     metrics: Arc<metrics::Recorder>,
     window: Option<graphics::Window>,
-    net: Option<server::Handle>,
+    raw_config: RawConfig,
 }
 
 impl ApplicationHandler for App {
@@ -97,7 +50,8 @@ impl ApplicationHandler for App {
             window,
             core.clone(),
             self.config.clone(),
-            self.net.take().unwrap(),
+            self.dirs.clone(),
+            self.raw_config.clone(),
         );
 
         // Initialize widely-shared graphics resources
@@ -115,7 +69,9 @@ impl ApplicationHandler for App {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        self.window = None;
+        if let Some(window) = self.window.take() {
+            self.raw_config = window.raw_config().clone();
+        }
     }
 
     fn window_event(
