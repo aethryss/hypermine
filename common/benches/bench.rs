@@ -6,7 +6,7 @@ use common::{
     node::{Chunk, ChunkId},
     proto::Position,
     traversal::{ensure_nearby, nearby_nodes},
-    worldgen::ChunkParams,
+    worldgen::{ChunkParams, WorldgenPreset},
 };
 
 fn build_graph(c: &mut Criterion) {
@@ -45,7 +45,7 @@ fn build_graph(c: &mut Criterion) {
             for (node, _) in all_nodes {
                 for vertex in Vertex::iter() {
                     let chunk = ChunkId::new(node, vertex);
-                    let params = ChunkParams::new(&mut graph, chunk);
+                    let params = ChunkParams::new(&mut graph, chunk, WorldgenPreset::Hyperbolic);
                     graph[chunk] = Chunk::Populated {
                         voxels: params.generate_voxels(),
                         surface: None,

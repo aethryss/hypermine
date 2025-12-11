@@ -1,3 +1,25 @@
+//! World generation unit conventions
+//!
+//! This module primarily operates in normalized, unit-chunk coordinates:
+//!
+//! - Voxel positions: `voxel_center` returns each axis in [0, 1]. One voxel spans `1 / dimension` of a chunk side.
+//! - Distances to planes: `Plane::distance_to_chunk(chunk, &point)` yields a signed distance in the same unit-chunk scale.
+//!   Interpreting values: `1.0` ≈ one full chunk edge length along the plane normal; positive is below/inside terrain
+//!   for the guiding surface, negative is above/outside (void), unless otherwise noted.
+//! - Elevation vs. distance: Environmental `max_elevation` is a height-like quantity produced by noise (see
+//!   `EnviroFactors::varied_from`). For solid/void decisions it is mapped into unit-chunk distance by dividing by
+//!   `TERRAIN_SMOOTHNESS = 10.0`, e.g. comparisons use `max_elevation / TERRAIN_SMOOTHNESS` vs. `voxel_elevation`.
+//! - Roads: Road placement thresholds (e.g., `horizontal_distance > 0.3`, `elevation < 0.075`) are in unit-chunk
+//!   distances, so `0.3` is ~30% of the chunk width.
+//! - Noise scaling: Feature sizes are controlled by sampling unit-chunk coordinates scaled by constants
+//!   (e.g. `world_pos = center * 10.0`, frequencies ~0.012–0.08). These are dimensionless but effectively tied to the
+//!   unit-chunk coordinate system.
+//!
+//! Rule of thumb: `1.0` equals one chunk side length; a single voxel is `1 / dimension` of that. Terrain “height” from
+//! enviro is converted to this distance space via division by `TERRAIN_SMOOTHNESS`.
+//! MOST OF THE FEATURES AND CONVENTIONS LISTED HERE ARE JUST FOR REFERENCE, 
+//! AND ARE TO-BE-DEPRECATED ONCE BETTER TERRAIN GENERATION IS IMPLEMENTED.
+
 use rand::{Rng, SeedableRng, distr::Uniform};
 use rand_distr::Normal;
 use noise::{NoiseFn, Perlin};
@@ -7,11 +29,12 @@ use crate::{
     dodeca::{Side, Vertex},
     graph::{Graph, NodeId},
     margins,
-    math::{self, MPoint, MVector},
+    math::{self, MIsometry, MPoint, MVector},
     node::{ChunkId, VoxelData},
     plane::Plane,
     proto::Position as ProtoPosition,
     terraingen::VoronoiInfo,
+    voxel_math::CoordAxis,
     world::{BlockID, BlockKind},
 };
 
@@ -84,6 +107,7 @@ pub struct NodeState {
     surface: Plane,
     road_state: NodeStateRoad,
     enviro: EnviroFactors,
+    world_from_node: MIsometry<f32>,
 }
 impl NodeState {
     pub fn root() -> Self {
@@ -97,6 +121,7 @@ impl NodeState {
                 rainfall: 0.0,
                 blockiness: 0.0,
             },
+            world_from_node: MIsometry::identity(),
         }
     }
 
@@ -122,6 +147,7 @@ impl NodeState {
 
         let child_kind = self.kind.child(side);
         let child_road = self.road_state.child(side);
+        let world_from_node = &self.world_from_node * side.reflection();
 
         Self {
             kind: child_kind,
@@ -132,11 +158,16 @@ impl NodeState {
             },
             road_state: child_road,
             enviro,
+            world_from_node,
         }
     }
 
     pub fn up_direction(&self) -> MVector<f32> {
         *self.surface.scaled_normal()
+    }
+
+    pub fn world_from_node(&self) -> &MIsometry<f32> {
+        &self.world_from_node
     }
 }
 
@@ -213,6 +244,7 @@ impl Iterator for VoxelCoords {
 
 /// Data needed to generate a chunk
 pub struct ChunkParams {
+    preset: WorldgenPreset,
     /// Number of voxels along an edge
     dimension: u8,
     /// Which vertex of the containing node this chunk lies against
@@ -227,16 +259,115 @@ pub struct ChunkParams {
     is_road_support: bool,
     /// Random quantity used to seed terrain gen
     node_spice: u64,
+    /// Transform from node-local space to global hyperbolic coordinates
+    world_from_node: MIsometry<f32>,
+    /// Center of this chunk in global coordinates (Beltrami projection)
+    chunk_center: na::Vector3<f32>,
+    /// Basis spanning the local horizontal plane (east, north, up)
+    horizontal_basis: [na::Vector3<f32>; 3],
+    /// Approximate scale mapping one chunk edge along the plane
+    horizontal_scale: f32,
+    /// Orientation of the chunk's up direction in voxel space
+    orientation: ChunkOrientation,
+}
+
+#[derive(Clone, Copy)]
+struct ChunkOrientation {
+    up_axis: CoordAxis,
+    up_sign: i8,
+    horizontal_axes: [CoordAxis; 2],
+}
+
+impl ChunkOrientation {
+    fn from_surface(surface: Plane, chunk: Vertex, dimension: u8) -> Self {
+        let mut best_axis = CoordAxis::X;
+        let mut best_magnitude = 0.0f32;
+        let mut best_sign = 1i8;
+        let center = na::Vector3::repeat(0.5);
+        let step = (1.0 / f32::from(dimension)).min(0.25);
+
+        for axis in CoordAxis::iter() {
+            let mut forward = center;
+            forward[axis as usize] = (forward[axis as usize] + step).min(0.999);
+            let mut backward = center;
+            backward[axis as usize] = (backward[axis as usize] - step).max(0.001);
+            let forward_dist = surface.distance_to_chunk(chunk, &forward);
+            let backward_dist = surface.distance_to_chunk(chunk, &backward);
+            let slope = forward_dist - backward_dist;
+            let magnitude = slope.abs();
+            if magnitude > best_magnitude {
+                best_magnitude = magnitude;
+                best_axis = axis;
+                best_sign = if slope < 0.0 { 1 } else { -1 };
+            }
+        }
+
+        Self {
+            up_axis: best_axis,
+            up_sign: best_sign,
+            horizontal_axes: best_axis.other_axes(),
+        }
+    }
+
+    fn up_axis(self) -> CoordAxis {
+        self.up_axis
+    }
+
+    fn up_sign(self) -> i8 {
+        self.up_sign
+    }
+
+    fn horizontal_axes(self) -> [CoordAxis; 2] {
+        self.horizontal_axes
+    }
+
+    fn column_index(&self, dimension: u8, coords: na::Vector3<u8>) -> usize {
+        let [axis0, axis1] = self.horizontal_axes;
+        let a = coords[axis0 as usize] as usize;
+        let b = coords[axis1 as usize] as usize;
+        a + b * dimension as usize
+    }
+
+    fn column_index_components(&self, dimension: u8, axis0: u8, axis1: u8) -> usize {
+        (axis0 as usize) + (axis1 as usize) * dimension as usize
+    }
 }
 
 impl ChunkParams {
     /// Extract data necessary to generate a chunk, generating new graph nodes if necessary
-    pub fn new(graph: &mut Graph, chunk: ChunkId) -> Self {
+    pub fn new(graph: &mut Graph, chunk: ChunkId, preset: WorldgenPreset) -> Self {
         graph.ensure_node_state(chunk.node);
         let env = chunk_incident_enviro_factors(graph, chunk);
         let state = graph.node_state(chunk.node);
+        let dimension = graph.layout().dimension();
+        let world_from_node = state.world_from_node().clone();
+        let chunk_center = chunk_point_world(
+            chunk.vertex,
+            &world_from_node,
+            na::Vector3::repeat(0.5),
+        );
+        let horizontal_basis = plane_basis(state.surface);
+        let horizontal_scale = {
+            let along_x = chunk_point_world(
+                chunk.vertex,
+                &world_from_node,
+                na::Vector3::new(1.0, 0.5, 0.5),
+            ) - chunk_point_world(
+                chunk.vertex,
+                &world_from_node,
+                na::Vector3::new(0.0, 0.5, 0.5),
+            );
+            let scale = along_x.dot(&horizontal_basis[0]).abs();
+            if scale <= f32::EPSILON {
+                f32::from(dimension)
+            } else {
+                scale
+            }
+        };
+        let orientation = ChunkOrientation::from_surface(state.surface, chunk.vertex, dimension);
         Self {
-            dimension: graph.layout().dimension(),
+            preset,
+            dimension,
             chunk: chunk.vertex,
             env,
             surface: state.surface,
@@ -245,6 +376,11 @@ impl ChunkParams {
             is_road_support: ((state.kind == Land) || (state.kind == DeepLand))
                 && ((state.road_state == East) || (state.road_state == West)),
             node_spice: graph.hash_of(chunk.node) as u64,
+            world_from_node,
+            chunk_center,
+            horizontal_basis,
+            horizontal_scale,
+            orientation,
         }
     }
 
@@ -252,8 +388,36 @@ impl ChunkParams {
         self.chunk
     }
 
+    pub fn world_point(&self, local: na::Vector3<f32>) -> na::Vector3<f32> {
+        chunk_point_world(self.chunk, &self.world_from_node, local)
+    }
+
+    fn horizontal_coords(&self, local: na::Vector3<f32>) -> na::Vector2<f32> {
+        let world = self.world_point(local);
+        let relative = world - self.chunk_center;
+        na::Vector2::new(
+            relative.dot(&self.horizontal_basis[0]) / self.horizontal_scale,
+            relative.dot(&self.horizontal_basis[1]) / self.horizontal_scale,
+        )
+    }
+
+    fn vertical_density_scale(&self) -> f32 {
+        f32::from(self.dimension) / 128.0
+    }
+
+    fn orientation(&self) -> ChunkOrientation {
+        self.orientation
+    }
+
     /// Generate voxels making up the chunk
     pub fn generate_voxels(&self) -> VoxelData {
+        match self.preset {
+            WorldgenPreset::Hyperbolic => remcpe::generate_chunk(self),
+            WorldgenPreset::Flat => self.generate_legacy_voxels(),
+        }
+    }
+
+    fn generate_legacy_voxels(&self) -> VoxelData {
         // Determine whether this chunk might contain a boundary between solid and void
         let mut me_min = self.env.max_elevations[0];
         let mut me_max = self.env.max_elevations[0];
@@ -761,6 +925,672 @@ fn hash(a: u64, b: u64) -> u64 {
     a.rotate_left(5)
         .bitxor(b)
         .wrapping_mul(0x517c_c1b7_2722_0a95)
+}
+
+fn chunk_point_world(
+    vertex: Vertex,
+    world_from_node: &MIsometry<f32>,
+    local: na::Vector3<f32>,
+) -> na::Vector3<f32> {
+    let node_space = vertex.chunk_to_node() * local.push(1.0);
+    let point = MVector::from(node_space).normalized_point();
+    minkowski_to_vec3(world_from_node * point)
+}
+
+fn minkowski_to_vec3(point: MPoint<f32>) -> na::Vector3<f32> {
+    let v: na::Vector4<f32> = point.into();
+    let inv_w = if v.w.abs() > f32::EPSILON {
+        v.w.recip()
+    } else {
+        1.0
+    };
+    na::Vector3::new(v.x * inv_w, v.y * inv_w, v.z * inv_w)
+}
+
+fn plane_basis(surface: Plane) -> [na::Vector3<f32>; 3] {
+    let normal_vec: na::Vector4<f32> = (*surface.scaled_normal()).into();
+    let mut up = na::Vector3::new(normal_vec.x, normal_vec.y, normal_vec.z);
+    if up.norm_squared() < 1.0e-6 {
+        up = na::Vector3::new(0.0, 1.0, 0.0);
+    }
+    up = up.normalize();
+    let mut east = up.cross(&na::Vector3::new(0.0, 0.0, 1.0));
+    if east.norm_squared() < 1.0e-6 {
+        east = up.cross(&na::Vector3::new(1.0, 0.0, 0.0));
+    }
+    east = east.normalize();
+    let north = up.cross(&east);
+    [east, north, up]
+}
+
+mod remcpe {
+    use super::*;
+    use noise::Perlin;
+    use rand::{Rng, SeedableRng};
+    use rand_pcg::Pcg64Mcg;
+
+    const WORLD_SEED: u32 = 0x5eed5eed;
+    const SEA_LEVEL: f32 = 0.0;
+    const MC_MIN_HEIGHT: f32 = -96.0;
+    const MC_MAX_HEIGHT: f32 = 96.0;
+    const MC_BEDROCK_FLOOR: f32 = -96.0;
+    const HEIGHT_MULTIPLIER: f32 = 1.25;
+    const CONTINENTAL_FREQ: f64 = 1.0 / 550.0;
+    const DETAIL_FREQ: f64 = 1.0 / 85.0;
+    const RIDGE_FREQ: f64 = 1.0 / 220.0;
+    const TEMP_FREQ: f64 = 1.0 / 700.0;
+    const RAIN_FREQ: f64 = 1.0 / 640.0;
+    const SURF_FREQ: f64 = 1.0 / 18.0;
+    const CAVE_HORIZ_FREQ: f64 = 1.0 / 28.0;
+    const CAVE_VERT_FREQ: f64 = 1.0 / 32.0;
+
+    fn chunk_height_span(params: &ChunkParams) -> f32 {
+        f32::from(params.dimension) * HEIGHT_MULTIPLIER
+    }
+
+    fn scale_height_to_chunk(params: &ChunkParams, value: f32) -> f32 {
+        (value / MC_MAX_HEIGHT) * chunk_height_span(params)
+    }
+
+    pub fn generate_chunk(params: &ChunkParams) -> VoxelData {
+        let mut voxels = VoxelData::Solid(BlockKind::Air.id());
+        let mut columns = build_columns(params);
+        {
+            let data = voxels.data_mut(params.dimension);
+            fill_base_layers(params, data, &mut columns);
+            carve_caves(params, data, &columns);
+            populate_ores(params, data, &columns);
+            populate_surface_features(params, data, &mut columns);
+        }
+        margins::initialize_margins(params.dimension, &mut voxels);
+        voxels
+    }
+
+    #[derive(Clone)]
+    struct ColumnData {
+        horizontal: na::Vector2<f32>,
+        height: f32,
+        biome: BiomeKind,
+        top_block: BlockID,
+        filler_block: BlockID,
+        surface_depth: u8,
+        freeze_water: bool,
+        vegetation_bias: f32,
+        top_voxel: Option<na::Vector3<u8>>,
+        top_depth: f32,
+    }
+
+    impl ColumnData {
+        fn new() -> Self {
+            Self {
+                horizontal: na::Vector2::zeros(),
+                height: 0.0,
+                biome: BiomeKind::Plains,
+                top_block: BlockKind::Grass.id(),
+                filler_block: BlockKind::Dirt.id(),
+                surface_depth: 1,
+                freeze_water: false,
+                vegetation_bias: 0.0,
+                top_voxel: None,
+                top_depth: f32::INFINITY,
+            }
+        }
+
+        fn idx(params: &ChunkParams, coords: na::Vector3<u8>) -> usize {
+            params
+                .orientation()
+                .column_index(params.dimension, coords)
+        }
+
+        fn idx_components(params: &ChunkParams, axis0: u8, axis1: u8) -> usize {
+            params
+                .orientation()
+                .column_index_components(params.dimension, axis0, axis1)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum BiomeKind {
+        Plains,
+        Desert,
+        Forest,
+        RainForest,
+        SeasonalForest,
+        Taiga,
+        Tundra,
+    }
+
+    impl BiomeKind {
+        fn classify(temp: f32, rain: f32) -> Self {
+            if temp < 0.25 {
+                return BiomeKind::Tundra;
+            }
+            if temp < 0.4 {
+                if rain > 0.5 {
+                    BiomeKind::Taiga
+                } else {
+                    BiomeKind::Plains
+                }
+            } else if temp > 0.8 && rain < 0.2 {
+                BiomeKind::Desert
+            } else if rain > 0.8 && temp > 0.7 {
+                BiomeKind::RainForest
+            } else if rain > 0.6 {
+                BiomeKind::Forest
+            } else if rain > 0.3 {
+                BiomeKind::SeasonalForest
+            } else {
+                BiomeKind::Plains
+            }
+        }
+
+        fn height_offset(self) -> f32 {
+            match self {
+                BiomeKind::Desert => -6.0,
+                BiomeKind::Plains => -2.0,
+                BiomeKind::Forest => 4.0,
+                BiomeKind::RainForest => 6.0,
+                BiomeKind::SeasonalForest => 3.0,
+                BiomeKind::Taiga => 2.0,
+                BiomeKind::Tundra => -4.0,
+            }
+        }
+
+        fn top_block(self) -> BlockID {
+            match self {
+                BiomeKind::Desert => BlockKind::Sand.id(),
+                BiomeKind::Tundra => BlockKind::SnowBlock.id(),
+                _ => BlockKind::Grass.id(),
+            }
+        }
+
+        fn filler_block(self) -> BlockID {
+            match self {
+                BiomeKind::Desert => BlockKind::Sandstone.id(),
+                BiomeKind::Tundra => BlockKind::Dirt.id(),
+                _ => BlockKind::Dirt.id(),
+            }
+        }
+
+        fn freeze_water(self) -> bool {
+            matches!(self, BiomeKind::Taiga | BiomeKind::Tundra)
+        }
+
+        fn tree_weight(self) -> i32 {
+            match self {
+                BiomeKind::RainForest => 8,
+                BiomeKind::Forest => 6,
+                BiomeKind::SeasonalForest => 5,
+                BiomeKind::Taiga => 4,
+                BiomeKind::Plains => 1,
+                _ => 0,
+            }
+        }
+    }
+
+    fn build_columns(params: &ChunkParams) -> Vec<ColumnData> {
+    let dimension = params.dimension as usize;
+    let mut columns = vec![ColumnData::new(); dimension * dimension];
+    let dim_f = f32::from(params.dimension);
+    let orientation = params.orientation();
+    let [axis0, axis1] = orientation.horizontal_axes();
+        let continental = Perlin::new(WORLD_SEED);
+        let detail = Perlin::new(WORLD_SEED ^ 0x9e37);
+        let ridge = Perlin::new(WORLD_SEED ^ 0x4d2);
+        let temp_noise = Perlin::new(WORLD_SEED ^ 0x6ac1);
+        let rain_noise = Perlin::new(WORLD_SEED ^ 0x35a7);
+        let surf_noise = Perlin::new(WORLD_SEED ^ 0x8e21);
+
+        for a in 0..params.dimension {
+            for b in 0..params.dimension {
+                let idx = ColumnData::idx_components(params, a, b);
+                let mut local = na::Vector3::repeat(0.5);
+                local[axis0 as usize] = (f32::from(a) + 0.5) / dim_f;
+                local[axis1 as usize] = (f32::from(b) + 0.5) / dim_f;
+                let horizontal = params.horizontal_coords(local);
+                let hx = horizontal.x as f64;
+                let hz = horizontal.y as f64;
+                let continental_val = continental.get([hx * CONTINENTAL_FREQ, hz * CONTINENTAL_FREQ]) as f32;
+                let detail_val = detail.get([hx * DETAIL_FREQ, hz * DETAIL_FREQ]) as f32;
+                let ridge_val = ridge.get([hx * RIDGE_FREQ, hz * RIDGE_FREQ]) as f32;
+                let temp = ((temp_noise.get([hx * TEMP_FREQ, hz * TEMP_FREQ]) as f32) * 0.4 + 0.6)
+                    .clamp(0.0, 1.0);
+                let rain = ((rain_noise.get([hx * RAIN_FREQ, hz * RAIN_FREQ]) as f32) * 0.5 + 0.5)
+                    .clamp(0.0, 1.0);
+                let biome = BiomeKind::classify(temp, rain);
+                let mut height = continental_val * 48.0 + detail_val * 8.0
+                    + ridge_val.abs() * 18.0
+                    + biome.height_offset();
+                height = height.clamp(MC_MIN_HEIGHT, MC_MAX_HEIGHT);
+                let scaled_height = scale_height_to_chunk(params, height);
+                let surface_depth = ((surf_noise.get([hx * SURF_FREQ, hz * SURF_FREQ]) as f32 + 1.0)
+                    * 1.5
+                    + 1.0) as u8;
+                let mut column = ColumnData::new();
+                column.horizontal = horizontal;
+                column.height = scaled_height;
+                column.biome = biome;
+                column.top_block = biome.top_block();
+                column.filler_block = biome.filler_block();
+                column.surface_depth = surface_depth.max(1);
+                column.freeze_water = biome.freeze_water();
+                column.vegetation_bias = rain;
+                columns[idx] = column;
+            }
+        }
+
+        columns
+    }
+
+    fn fill_base_layers(
+        params: &ChunkParams,
+        voxels: &mut [BlockID],
+        columns: &mut [ColumnData],
+    ) {
+        let mut rng = Pcg64Mcg::seed_from_u64(params.node_spice);
+        let bedrock_floor = scale_height_to_chunk(params, MC_BEDROCK_FLOOR);
+        let bedrock_variance = scale_height_to_chunk(params, 4.0);
+        let sea_level = scale_height_to_chunk(params, SEA_LEVEL);
+        for (coords_x, coords_y, coords_z) in VoxelCoords::new(params.dimension) {
+            let coords = na::Vector3::new(coords_x, coords_y, coords_z);
+            let column_idx = ColumnData::idx(params, coords);
+            let column = &mut columns[column_idx];
+            let center = voxel_center(params.dimension, coords);
+            let block_height = -params
+                .surface
+                .distance_to_chunk(params.chunk, &center)
+                * f32::from(params.dimension);
+            let mut block = BlockKind::Air.id();
+
+            if block_height <= bedrock_floor + rng.gen_range(0.0..bedrock_variance) {
+                block = BlockKind::Bedrock.id();
+            } else if block_height <= column.height {
+                let depth = column.height - block_height;
+                if depth < column.surface_depth as f32 {
+                    block = column.top_block;
+                    if depth < column.top_depth {
+                        column.top_voxel = Some(coords);
+                        column.top_depth = depth;
+                    }
+                } else if depth < column.surface_depth as f32 + 3.0 {
+                    block = column.filler_block;
+                } else {
+                    block = BlockKind::Stone.id();
+                }
+            } else if block_height <= sea_level {
+                block = if column.freeze_water && block_height >= sea_level - 1.0 {
+                    BlockKind::Ice.id()
+                } else {
+                    BlockKind::Water.id()
+                };
+            }
+
+            if block != BlockKind::Air.id() {
+                voxels[index(params.dimension, coords)] = block;
+            }
+        }
+    }
+
+    fn carve_caves(params: &ChunkParams, voxels: &mut [BlockID], columns: &[ColumnData]) {
+        let cave_noise = Perlin::new(WORLD_SEED ^ 0xacab);
+        let min_cave_height = scale_height_to_chunk(params, MC_MIN_HEIGHT + 4.0);
+        for (coords_x, coords_y, coords_z) in VoxelCoords::new(params.dimension) {
+            let coords = na::Vector3::new(coords_x, coords_y, coords_z);
+            let column_idx = ColumnData::idx(params, coords);
+            let column = &columns[column_idx];
+            let center = voxel_center(params.dimension, coords);
+            let block_height = -params
+                .surface
+                .distance_to_chunk(params.chunk, &center)
+                * f32::from(params.dimension);
+            if block_height > column.height || block_height < min_cave_height {
+                continue;
+            }
+            let horizontal = column.horizontal;
+            let noise_val = cave_noise.get([
+                horizontal.x as f64 * CAVE_HORIZ_FREQ,
+                block_height as f64 * CAVE_VERT_FREQ,
+                horizontal.y as f64 * CAVE_HORIZ_FREQ,
+            ]) as f32;
+            if noise_val > 0.55 {
+                let idx = index(params.dimension, coords);
+                match voxels[idx] {
+                    0 => {}
+                    block if block == BlockKind::Bedrock.id() => {}
+                    block => {
+                        if block != BlockKind::Water.id() && block != BlockKind::Ice.id() {
+                            voxels[idx] = BlockKind::Air.id();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    struct OreConfig {
+        block: BlockID,
+        attempts: u32,
+        cluster: u8,
+        min_height: f32,
+        max_height: f32,
+    }
+
+    fn populate_ores(params: &ChunkParams, voxels: &mut [BlockID], _columns: &[ColumnData]) {
+        let configs = [
+            OreConfig {
+                block: BlockKind::Dirt.id(),
+                attempts: 20,
+                cluster: 32,
+                min_height: MC_MIN_HEIGHT,
+                max_height: MC_MAX_HEIGHT,
+            },
+            OreConfig {
+                block: BlockKind::Gravel.id(),
+                attempts: 12,
+                cluster: 24,
+                min_height: MC_MIN_HEIGHT,
+                max_height: MC_MAX_HEIGHT,
+            },
+            OreConfig {
+                block: BlockKind::CoalOre.id(),
+                attempts: 16,
+                cluster: 16,
+                min_height: -64.0,
+                max_height: 64.0,
+            },
+            OreConfig {
+                block: BlockKind::IronOre.id(),
+                attempts: 20,
+                cluster: 8,
+                min_height: -32.0,
+                max_height: 32.0,
+            },
+            OreConfig {
+                block: BlockKind::GoldOre.id(),
+                attempts: 2,
+                cluster: 8,
+                min_height: -16.0,
+                max_height: 16.0,
+            },
+            OreConfig {
+                block: BlockKind::RedstoneOre.id(),
+                attempts: 8,
+                cluster: 7,
+                min_height: -24.0,
+                max_height: 0.0,
+            },
+            OreConfig {
+                block: BlockKind::DiamondOre.id(),
+                attempts: 1,
+                cluster: 6,
+                min_height: -16.0,
+                max_height: -4.0,
+            },
+        ];
+
+        let mut rng = Pcg64Mcg::seed_from_u64(hash(params.node_spice, params.chunk as u64));
+        let density_scale = params.vertical_density_scale().clamp(0.01, 8.0);
+        for cfg in configs {
+            let min_height = scale_height_to_chunk(params, cfg.min_height);
+            let max_height = scale_height_to_chunk(params, cfg.max_height);
+            let scaled_attempts = cfg.attempts as f32 * density_scale;
+            let mut attempts = scaled_attempts.floor() as u32;
+            let fractional = scaled_attempts - attempts as f32;
+            if fractional > 0.0 && rng.gen_bool(fractional as f64) {
+                attempts += 1;
+            }
+            for _ in 0..attempts {
+                let x = rng.gen_range(0..params.dimension);
+                let z = rng.gen_range(0..params.dimension);
+                let y = rng.gen_range(0..params.dimension);
+                let coords = na::Vector3::new(x, y, z);
+                let height = column_height(params, coords);
+                if height < min_height || height > max_height {
+                    continue;
+                }
+                place_ore_cluster(params, voxels, coords, cfg.cluster, cfg.block, &mut rng);
+            }
+        }
+    }
+
+    fn place_ore_cluster(
+        params: &ChunkParams,
+        voxels: &mut [BlockID],
+        start: na::Vector3<u8>,
+        cluster: u8,
+        block: BlockID,
+        rng: &mut Pcg64Mcg,
+    ) {
+        let dimension = params.dimension;
+        for _ in 0..cluster {
+            let offset = [
+                rng.gen_range(-1..=1),
+                rng.gen_range(-1..=1),
+                rng.gen_range(-1..=1),
+            ];
+            let mut coords = start;
+            for axis in 0..3 {
+                let value = coords[axis] as i16 + offset[axis] as i16;
+                if value < 0 || value >= dimension as i16 {
+                    continue;
+                }
+                coords[axis] = value as u8;
+            }
+            let idx = index(dimension, coords);
+            if matches!(voxels[idx], b if b == BlockKind::Stone.id()) {
+                voxels[idx] = block;
+            }
+        }
+    }
+
+    fn column_height(params: &ChunkParams, coords: na::Vector3<u8>) -> f32 {
+        let center = voxel_center(params.dimension, coords);
+        -params
+            .surface
+            .distance_to_chunk(params.chunk, &center)
+            * f32::from(params.dimension)
+    }
+
+    fn populate_surface_features(
+        params: &ChunkParams,
+        voxels: &mut [BlockID],
+        columns: &mut [ColumnData],
+    ) {
+        let mut rng = Pcg64Mcg::seed_from_u64(hash(params.node_spice, params.chunk as u64 ^ 0xfeed));
+        let density_scale = params.vertical_density_scale().clamp(0.01, 1.0);
+        for a in 0..params.dimension {
+            for b in 0..params.dimension {
+                let idx = ColumnData::idx_components(params, a, b);
+                let column = &columns[idx];
+                if column.top_voxel.is_none() {
+                    continue;
+                }
+                let top = column.top_voxel.unwrap();
+                match column.biome {
+                    BiomeKind::Desert => {
+                        let cactus_prob = (0.05 * density_scale).min(1.0);
+                        if rng.gen_bool(cactus_prob as f64) {
+                            place_cactus(params, voxels, top, rng.gen_range(2..5));
+                        }
+                    }
+                    _ => {
+                        if column.biome.tree_weight() > 0 {
+                            let base_prob = column.biome.tree_weight() as f32 / 10.0;
+                            let tree_prob = (base_prob * density_scale).clamp(0.0, 1.0);
+                            if rng.gen_bool(tree_prob as f64) {
+                                let _ = place_tree(params, voxels, top, &mut rng);
+                                continue;
+                            }
+                        }
+                        let flower_prob = (0.05 * density_scale).min(1.0);
+                        if rng.gen_bool(flower_prob as f64) {
+                            place_flower(params, voxels, top);
+                            continue;
+                        }
+                        let mushroom_prob = (0.03 * density_scale).min(1.0);
+                        if rng.gen_bool(mushroom_prob as f64) {
+                            place_mushroom(params, voxels, top, rng.gen_bool(0.5));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_tree(
+        params: &ChunkParams,
+        voxels: &mut [BlockID],
+        base: na::Vector3<u8>,
+        rng: &mut Pcg64Mcg,
+    ) -> bool {
+        let height = rng.gen_range(4..7);
+        let orientation = params.orientation();
+        if !can_extend_along_up(params.dimension, base, &orientation, height as i32 + 2) {
+            return false;
+        }
+        let idx = index(params.dimension, base);
+        let soil = voxels[idx];
+        if soil != BlockKind::Grass.id() && soil != BlockKind::Dirt.id() {
+            return false;
+        }
+        let mut pos = base.map(|c| i32::from(c));
+        for _ in 0..height {
+            pos = offset_along_axis(pos, orientation.up_axis(), orientation.up_sign() as i32);
+            if !in_bounds(pos, params.dimension) {
+                return false;
+            }
+            let coords = vec_i32_to_u8(pos);
+            let idx = index(params.dimension, coords);
+            voxels[idx] = BlockKind::Log.id();
+        }
+        let mut leaf_base = base.map(|c| i32::from(c));
+        leaf_base = offset_along_axis(
+            leaf_base,
+            orientation.up_axis(),
+            orientation.up_sign() as i32 * height as i32,
+        );
+        let [axis_a, axis_b] = orientation.horizontal_axes();
+        for dx in -2i32..=2i32 {
+            for dz in -2i32..=2i32 {
+                for dy in 0i32..=2i32 {
+                    if dx.abs() + dz.abs() + dy > 4 {
+                        continue;
+                    }
+                    let mut coords = leaf_base;
+                    coords[axis_a as usize] += dx;
+                    coords[axis_b as usize] += dz;
+                    coords[orientation.up_axis() as usize] += dy * orientation.up_sign() as i32;
+                    if !in_bounds(coords, params.dimension) {
+                        continue;
+                    }
+                    let coords_u8 = vec_i32_to_u8(coords);
+                    let idx = index(params.dimension, coords_u8);
+                    if voxels[idx] == BlockKind::Air.id() {
+                        voxels[idx] = BlockKind::Leaves.id();
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn place_cactus(params: &ChunkParams, voxels: &mut [BlockID], base: na::Vector3<u8>, height: u8) {
+        let orientation = params.orientation();
+        if !can_extend_along_up(params.dimension, base, &orientation, height as i32 + 1) {
+            return;
+        }
+        let mut pos = base.map(|c| i32::from(c));
+        for _ in 0..height {
+            pos = offset_along_axis(pos, orientation.up_axis(), orientation.up_sign() as i32);
+            if !in_bounds(pos, params.dimension) {
+                break;
+            }
+            let coords = vec_i32_to_u8(pos);
+            let idx = index(params.dimension, coords);
+            voxels[idx] = BlockKind::Cactus.id();
+        }
+    }
+
+    fn place_flower(params: &ChunkParams, voxels: &mut [BlockID], base: na::Vector3<u8>) {
+        if let Some(coords) = neighbor_up(params.dimension, base, params.orientation()) {
+            let idx = index(params.dimension, coords);
+            if voxels[idx] == BlockKind::Air.id() {
+                voxels[idx] = BlockKind::Flower.id();
+            }
+        }
+    }
+
+    fn place_mushroom(
+        params: &ChunkParams,
+        voxels: &mut [BlockID],
+        base: na::Vector3<u8>,
+        brown: bool,
+    ) {
+        if let Some(coords) = neighbor_up(params.dimension, base, params.orientation()) {
+            let idx = index(params.dimension, coords);
+            if voxels[idx] == BlockKind::Air.id() {
+                voxels[idx] = if brown {
+                    BlockKind::BrownMushroom.id()
+                } else {
+                    BlockKind::RedMushroom.id()
+                };
+            }
+        }
+    }
+
+    fn neighbor_up(
+        dimension: u8,
+        base: na::Vector3<u8>,
+        orientation: ChunkOrientation,
+    ) -> Option<na::Vector3<u8>> {
+        let next = offset_along_axis(
+            base.map(|c| i32::from(c)),
+            orientation.up_axis(),
+            orientation.up_sign() as i32,
+        );
+        if !in_bounds(next, dimension) {
+            None
+        } else {
+            Some(vec_i32_to_u8(next))
+        }
+    }
+
+    fn can_extend_along_up(
+        dimension: u8,
+        base: na::Vector3<u8>,
+        orientation: &ChunkOrientation,
+        needed: i32,
+    ) -> bool {
+        let coord = i32::from(base[orientation.up_axis() as usize]);
+        let room = if orientation.up_sign() > 0 {
+            (i32::from(dimension) - 1) - coord
+        } else {
+            coord
+        };
+        room >= needed
+    }
+
+    fn offset_along_axis(
+        mut coords: na::Vector3<i32>,
+        axis: CoordAxis,
+        delta: i32,
+    ) -> na::Vector3<i32> {
+        coords[axis as usize] += delta;
+        coords
+    }
+
+    fn in_bounds(coords: na::Vector3<i32>, dimension: u8) -> bool {
+        coords.x >= 0
+            && coords.y >= 0
+            && coords.z >= 0
+            && coords.x < i32::from(dimension)
+            && coords.y < i32::from(dimension)
+            && coords.z < i32::from(dimension)
+    }
+
+    fn vec_i32_to_u8(coords: na::Vector3<i32>) -> na::Vector3<u8> {
+        na::Vector3::new(coords.x as u8, coords.y as u8, coords.z as u8)
+    }
 }
 
 #[cfg(test)]

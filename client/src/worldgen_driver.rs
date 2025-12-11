@@ -68,7 +68,7 @@ impl WorldgenDriver {
                 }
 
                 // Generate voxel data
-                let params = common::worldgen::ChunkParams::new(graph, chunk_id);
+                let params = common::worldgen::ChunkParams::new(graph, chunk_id, self.preset);
                 if let Some(voxel_data) = self.preloaded_voxel_data.remove(&chunk_id) {
                     self.add_chunk_to_graph(graph, chunk_id, voxel_data);
                 } else if self
@@ -76,7 +76,6 @@ impl WorldgenDriver {
                     .load(ChunkDesc {
                         node,
                         params,
-                        preset: self.preset,
                     })
                 {
                     graph[chunk_id] = Chunk::Generating;
@@ -134,7 +133,6 @@ impl WorldgenDriver {
 struct ChunkDesc {
     node: NodeId,
     params: common::worldgen::ChunkParams,
-    preset: WorldgenPreset,
 }
 
 struct LoadedChunk {
