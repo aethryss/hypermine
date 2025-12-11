@@ -71,13 +71,7 @@ impl WorldgenDriver {
                 let params = common::worldgen::ChunkParams::new(graph, chunk_id, self.preset);
                 if let Some(voxel_data) = self.preloaded_voxel_data.remove(&chunk_id) {
                     self.add_chunk_to_graph(graph, chunk_id, voxel_data);
-                } else if self
-                    .work_queue
-                    .load(ChunkDesc {
-                        node,
-                        params,
-                    })
-                {
+                } else if self.work_queue.load(ChunkDesc { node, params }) {
                     graph[chunk_id] = Chunk::Generating;
                 } else {
                     // No capacity is available in the work queue. Stop trying to prepare chunks to generate.

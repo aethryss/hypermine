@@ -166,7 +166,7 @@ impl SurfaceExtraction {
 pub struct ScratchBuffer {
     dimension: u32,
     params: DedicatedBuffer,
-    texture_indices: DedicatedMapping<[u32]>,  // Maps BlockID to texture_index
+    texture_indices: DedicatedMapping<[u32]>, // Maps BlockID to texture_index
     /// Size of a single entry in the voxel buffer
     voxel_buffer_unit: vk::DeviceSize,
     /// Size of a single entry in the state buffer
@@ -218,7 +218,7 @@ impl ScratchBuffer {
                 }
                 texture_indices_data[block_id] = block.texture_index as u32;
             }
-            
+
             let mut texture_indices = DedicatedMapping::<[u32]>::zeroed_array(
                 device,
                 &gfx.memory_properties,
@@ -272,7 +272,7 @@ impl ScratchBuffer {
                         .pool_sizes(&[
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                                descriptor_count: 2,  // params + texture_indices
+                                descriptor_count: 2, // params + texture_indices
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::STORAGE_BUFFER,

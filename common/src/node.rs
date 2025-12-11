@@ -51,7 +51,7 @@ impl Graph {
                 let parent_state = self.node_state(self.neighbor(node_id, i).unwrap());
                 parent_state.child(self, node_id, i)
             })
-            .unwrap_or_else(NodeState::root);
+            .unwrap_or_else(|| NodeState::root(self, node_id));
         self[node_id].state = Some(node_state);
     }
 
@@ -158,7 +158,7 @@ impl Graph {
         let Chunk::Populated { voxels, .. } = &self[chunk_id] else {
             return None;
         };
-    Some(voxels.get(coords.to_index(dimension)))
+        Some(voxels.get(coords.to_index(dimension)))
     }
 
     /// Tries to update the block at the given position to the given material.
@@ -181,7 +181,7 @@ impl Graph {
             .get_mut(block_update.coords.to_index(dimension))
             .expect("coords are in-bounds");
 
-    *voxel = block_update.new_tile_id;
+        *voxel = block_update.new_tile_id;
         *old_surface = surface.take().or(*old_surface);
 
         for chunk_direction in ChunkDirection::iter() {
@@ -245,7 +245,7 @@ pub enum Chunk {
     /// This chunk's voxels are fully generated and ready for use.
     Populated {
         /// The voxels present in the chunk
-    voxels: VoxelData,
+        voxels: VoxelData,
 
         /// A reference to the "mesh" used to render the chunk. Set to `None` if
         /// this mesh needs to be computed or recomputed.
@@ -276,7 +276,8 @@ impl VoxelData {
         match *self {
             VoxelData::Dense(ref mut d) => d,
             VoxelData::Solid(block_id) => {
-                *self = VoxelData::Dense(vec![block_id; (usize::from(dimension) + 2).pow(3)].into());
+                *self =
+                    VoxelData::Dense(vec![block_id; (usize::from(dimension) + 2).pow(3)].into());
                 self.data_mut(dimension)
             }
         }
@@ -308,7 +309,7 @@ impl VoxelData {
             .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
 
-    let mut data = vec![0u16; (usize::from(dimension) + 2).pow(3)]; // 0 is Air
+        let mut data = vec![0u16; (usize::from(dimension) + 2).pow(3)]; // 0 is Air
         for z in 0..dimension {
             for y in 0..dimension {
                 for x in 0..dimension {

@@ -171,7 +171,7 @@ pub struct CharacterConfig {
 impl CharacterConfig {
     pub fn from_raw(x: &CharacterConfigRaw, meters_to_absolute: f32) -> Self {
         // ClassiCube physics constants (converted from per-tick at 20 ticks/sec to per-second):
-        // 
+        //
         // Player dimensions (from Model.c HumanModel):
         // - Collision Size: (8.6, 28.1, 8.6) in 1/16ths = (0.5375, 1.756, 0.5375) blocks
         // - Eye height: 26/16 = 1.625 blocks
@@ -193,7 +193,7 @@ impl CharacterConfig {
             ground_acceleration: x.ground_acceleration.unwrap_or(50.0) * meters_to_absolute,
             // ClassiCube: air factor 0.02 = 1/5 of ground = much less air control
             air_acceleration: x.air_acceleration.unwrap_or(10.0) * meters_to_absolute,
-            // ClassiCube: gravity 0.08 * 20 ticks/sec = 1.6 m/tick² -> ~32 m/s² 
+            // ClassiCube: gravity 0.08 * 20 ticks/sec = 1.6 m/tick² -> ~32 m/s²
             // but feels like ~20 m/s² in practice due to drag
             gravity_acceleration: x.gravity_acceleration.unwrap_or(28.0) * meters_to_absolute,
             // ClassiCube: drag 0.91 horizontal per tick at 20 ticks = 0.91^20 ≈ 0.15 per second

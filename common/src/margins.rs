@@ -297,12 +297,12 @@ mod tests {
         // coordinates are adjacent to each other.
 
         // `voxels` lives at vertex F
-    let mut voxels = VoxelData::Solid(BlockKind::Air.id());
-    voxels.data_mut(12)[Coords([11, 2, 10]).to_index(12)] = BlockKind::WoodPlanks.id();
+        let mut voxels = VoxelData::Solid(BlockKind::Air.id());
+        voxels.data_mut(12)[Coords([11, 2, 10]).to_index(12)] = BlockKind::WoodPlanks.id();
 
         // `neighbor_voxels` lives at vertex J
-    let mut neighbor_voxels = VoxelData::Solid(BlockKind::Air.id());
-    neighbor_voxels.data_mut(12)[Coords([2, 10, 11]).to_index(12)] = BlockKind::Grass.id();
+        let mut neighbor_voxels = VoxelData::Solid(BlockKind::Air.id());
+        neighbor_voxels.data_mut(12)[Coords([2, 10, 11]).to_index(12)] = BlockKind::Grass.id();
 
         // Sanity check that voxel adjacencies are as expected. If the test fails here, it's likely that "dodeca.rs" was
         // redesigned, and the test itself will have to be fixed, rather than the code being tested.

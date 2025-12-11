@@ -176,10 +176,7 @@ impl Sim {
     }
 
     /// Returns an EntityId in the inventory with the given material
-    pub fn get_any_inventory_entity_matching_tile(
-        &self,
-        tile_id: u16,
-    ) -> Option<EntityId> {
+    pub fn get_any_inventory_entity_matching_tile(&self, tile_id: u16) -> Option<EntityId> {
         self.world
             .get::<&Inventory>(self.local_character?)
             .ok()?
@@ -188,9 +185,7 @@ impl Sim {
             .copied()
             .find(|e| {
                 self.entity_ids.get(e).is_some_and(|&entity| {
-                    self.world
-                        .get::<&u16>(entity)
-                        .is_ok_and(|m| *m == tile_id)
+                    self.world.get::<&u16>(entity).is_ok_and(|m| *m == tile_id)
                 })
             })
     }
@@ -209,9 +204,7 @@ impl Sim {
             .copied()
             .filter(|e| {
                 self.entity_ids.get(e).is_some_and(|&entity| {
-                    self.world
-                        .get::<&u16>(entity)
-                        .is_ok_and(|m| *m == tile_id)
+                    self.world.get::<&u16>(entity).is_ok_and(|m| *m == tile_id)
                 })
             })
             .count()
@@ -525,9 +518,7 @@ impl Sim {
         let mut pos = self.local_character_controller.oriented_position();
         let up = self.graph.get_relative_up(&pos).unwrap();
         // Position camera at eye height (ClassiCube: 1.625 blocks above feet)
-        pos.local *= MIsometry::translation_along(
-            &(up.as_ref() * self.cfg.character.eye_height),
-        );
+        pos.local *= MIsometry::translation_along(&(up.as_ref() * self.cfg.character.eye_height));
         pos
     }
 

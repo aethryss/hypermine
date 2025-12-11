@@ -93,7 +93,7 @@ mod tests {
         proto::Position,
         traversal::{ensure_nearby, nearby_nodes},
         voxel_math::Coords,
-    world::BlockKind,
+        world::BlockKind,
     };
 
     use super::*;

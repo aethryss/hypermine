@@ -306,7 +306,11 @@ fn voxel_is_solid(voxel_data: &VoxelData, layout: &ChunkLayout, coords: [u8; 3])
 
 #[cfg(test)]
 mod tests {
-    use crate::{math::MIsometry, node::VoxelData, world::{BlockID, BlockKind}};
+    use crate::{
+        math::MIsometry,
+        node::VoxelData,
+        world::{BlockID, BlockKind},
+    };
 
     use super::*;
 

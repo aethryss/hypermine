@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use client::{graphics, metrics, Config, RawConfig};
+use client::{Config, RawConfig, graphics, metrics};
 
 use ash::khr;
 use winit::{

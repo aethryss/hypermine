@@ -65,6 +65,11 @@ The project implements sophisticated hyperbolic space mathematics:
 - **Horospheres and ideal points** for rendering infinity and spatial optimization
 - See [docs/README.md](docs/README.md) for comprehensive mathematical background
 
+### Hyperbolic Terrain Generation
+- **Continuous noise in \(\mathbb{H}^3\)**: `common/src/hyper_noise.rs` implements a custom gradient-noise sampler that hashes true hyperbolic coordinates, guaranteeing continuity across node and chunk boundaries.
+- **REM:CPE-inspired layering**: The world generator mirrors the continental/detail/cave pipeline from the legacy `remcpe` reference, but every octave now samples the hyperbolic coordinate frame so scale and biome transitions feel consistent regardless of curvature.
+- **Deterministic FBM/Ridged helpers**: Utility functions provide fBm and ridged multi-fractal composites tuned for hyperbolic distances, making it straightforward to add new terrain features without reintroducing Euclidean artifacts.
+
 ### Dodecahedral Tiling
 Instead of infinite Euclidean grids, Hyperbolicraft uses the **order-4 dodecahedral honeycomb**:
 - Each dodecahedron (node) contains 20 chunks (one per vertex)

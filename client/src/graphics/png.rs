@@ -21,7 +21,7 @@ impl Loadable for Png {
                 .cfg
                 .find_asset(&self.path)
                 .ok_or_else(|| anyhow!("{} not found", self.path.display()))?;
-            
+
             trace!(path=%full_path.display(), "loading PNG");
             let file = File::open(&full_path)
                 .with_context(|| format!("opening {}", full_path.display()))?;
@@ -29,7 +29,7 @@ impl Loadable for Png {
             let mut reader = decoder
                 .read_info()
                 .with_context(|| format!("decoding {}", full_path.display()))?;
-            
+
             // Copy dimensions and color info
             let (width, height, bytes_per_pixel) = {
                 let info = reader.info();
@@ -42,20 +42,20 @@ impl Loadable for Png {
                 };
                 (info.width, info.height, bpp)
             };
-            
+
             // Allocate buffer for raw PNG data
             let raw_data_size = width as usize * height as usize * bytes_per_pixel;
-            
+
             // Read PNG data into temporary buffer
             let mut raw_data = vec![0u8; raw_data_size];
             reader
                 .next_frame(&mut raw_data)
                 .with_context(|| format!("decoding {}", full_path.display()))?;
-            
+
             // Convert to RGBA if needed
             let mut mem_data = vec![0u8; width as usize * height as usize * 4];
             match bytes_per_pixel {
-                4 => mem_data.copy_from_slice(&raw_data),  // Already RGBA
+                4 => mem_data.copy_from_slice(&raw_data), // Already RGBA
                 3 => {
                     // Convert RGB to RGBA (add alpha channel)
                     for (i, chunk) in raw_data.chunks_exact(3).enumerate() {
@@ -64,19 +64,22 @@ impl Loadable for Png {
                         mem_data[i * 4 + 2] = chunk[2];
                         mem_data[i * 4 + 3] = 255;
                     }
-                },
-                _ => anyhow::bail!("Unsupported PNG color type with {} bytes per pixel", bytes_per_pixel),
+                }
+                _ => anyhow::bail!(
+                    "Unsupported PNG color type with {} bytes per pixel",
+                    bytes_per_pixel
+                ),
             }
-            
+
             let mut mem = handle
                 .staging
                 .alloc(mem_data.len())
                 .await
                 .ok_or_else(|| anyhow!("{}: image too large", full_path.display()))?;
-            
+
             // Copy the converted data into the staging buffer
             mem.copy_from_slice(&mem_data);
-            
+
             unsafe {
                 let image = DedicatedImage::new(
                     &handle.gfx.device,

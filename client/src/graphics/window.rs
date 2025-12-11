@@ -8,7 +8,7 @@ use lahar::DedicatedImage;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use save::Save;
 use tokio::runtime::Builder;
-use tracing::{debug, error, error_span, info, Instrument};
+use tracing::{Instrument, debug, error, error_span, info};
 use winit::event::KeyEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -20,7 +20,7 @@ use winit::{
 
 use super::gui::{GuiAction, GuiState, SessionOptions};
 use super::{Base, Core, Draw, Frustum};
-use crate::{config::RawConfig, net, Config, Sim};
+use crate::{Config, Sim, config::RawConfig, net};
 use common::proto;
 use server::{self, Message, Server};
 
@@ -160,7 +160,7 @@ impl Window {
     pub fn handle_event(&mut self, event: WindowEvent, event_loop: &ActiveEventLoop) {
         // Forward events to yakui first for GUI handling
         self.yak_winit.handle_window_event(&mut self.yak, &event);
-        
+
         match event {
             WindowEvent::RedrawRequested => {
                 let mut pending_messages = Vec::new();
@@ -227,30 +227,35 @@ impl Window {
                     sim.set_place_block_pressed_true();
                 }
             }
-            WindowEvent::MouseWheel {
-                delta,
-                ..
-            } => {
+            WindowEvent::MouseWheel { delta, .. } => {
                 // Scroll wheel for block selection
                 let scroll_direction = match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
-                        if y > 0.0 { 1 } else { -1 }
+                        if y > 0.0 {
+                            1
+                        } else {
+                            -1
+                        }
                     }
                     MouseScrollDelta::PixelDelta(pos) => {
-                        if pos.y > 0.0 { 1 } else { -1 }
+                        if pos.y > 0.0 {
+                            1
+                        } else {
+                            -1
+                        }
                     }
                 };
-                
+
                 let max_tile_id = 70u16; // Total number of tile types (0-69)
                 let current = self.input.selected_tile_id as i32;
                 let new_id = (current + scroll_direction) % max_tile_id as i32;
-                let new_id = if new_id < 0 { 
-                    (max_tile_id as i32 + new_id) as u16 
-                } else { 
-                    new_id as u16 
+                let new_id = if new_id < 0 {
+                    (max_tile_id as i32 + new_id) as u16
+                } else {
+                    new_id as u16
                 };
                 self.input.selected_tile_id = new_id;
-                
+
                 // Update the sim with the selected tile ID
                 if let Some(sim) = self.sim.as_mut() {
                     sim.select_tile_by_id(new_id);
@@ -339,8 +344,7 @@ impl Window {
                 self.sim = None;
                 self.active_session = None;
                 self.gui_state = GuiState::new(self.raw_config.clone());
-                self.gui_state
-                    .set_error(format!("Connection lost: {}", e));
+                self.gui_state.set_error(format!("Connection lost: {}", e));
             }
             Message::Hello(msg) => {
                 let chunk_parallelism = self
@@ -353,7 +357,12 @@ impl Window {
                     .as_ref()
                     .map(|session| session.start_in_freecam)
                     .unwrap_or(true);
-                let sim = Sim::new(msg.sim_config, chunk_parallelism, msg.character, start_in_freecam);
+                let sim = Sim::new(
+                    msg.sim_config,
+                    chunk_parallelism,
+                    msg.character,
+                    start_in_freecam,
+                );
                 if let Some(draw) = self.draw.as_mut() {
                     draw.configure(sim.cfg());
                 }
@@ -463,7 +472,10 @@ impl Window {
 
     fn handle_gui_action(&mut self, action: GuiAction) {
         match action {
-            GuiAction::StartSession { session, raw_config } => {
+            GuiAction::StartSession {
+                session,
+                raw_config,
+            } => {
                 if self.active_session.is_some() {
                     match Config::save_raw_config(&self.config_path, &raw_config) {
                         Ok(()) => {
@@ -472,10 +484,8 @@ impl Window {
                                 .set_info("Configuration saved for next launch.");
                         }
                         Err(err) => {
-                            self.gui_state.set_error(format!(
-                                "Failed to save configuration: {}",
-                                err
-                            ));
+                            self.gui_state
+                                .set_error(format!("Failed to save configuration: {}", err));
                         }
                     }
                     return;
@@ -493,7 +503,11 @@ impl Window {
         }
     }
 
-    fn start_session(&mut self, session: SessionOptions, raw_config: RawConfig) -> Result<(), String> {
+    fn start_session(
+        &mut self,
+        session: SessionOptions,
+        raw_config: RawConfig,
+    ) -> Result<(), String> {
         Config::save_raw_config(&self.config_path, &raw_config)
             .map_err(|err| format!("Failed to save configuration: {}", err))?;
 
@@ -531,10 +545,7 @@ impl Window {
         let name = (*session.player_name).into();
 
         thread::spawn(move || {
-            let runtime = Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .unwrap();
+            let runtime = Builder::new_current_thread().enable_time().build().unwrap();
             let _guard = runtime.enter();
             if let Err(err) = server.connect(proto::ClientHello { name }, backend) {
                 error!("failed to connect to local server: {}", err);

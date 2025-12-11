@@ -141,7 +141,7 @@ struct Surface {
     y: u8,
     z: u8,
     axis: u8,
-    mat: u16,  // texture_index instead of Material
+    mat: u16, // texture_index instead of Material
     occlusion: u8,
 }
 
@@ -201,7 +201,7 @@ fn surface_extraction() {
             y: 0,
             z: 1,
             axis: 5,
-            mat: 2,  // texture_index for Dirt
+            mat: 2, // texture_index for Dirt
             occlusion: 0xFF,
         },
         Surface {
@@ -209,7 +209,7 @@ fn surface_extraction() {
             y: 0,
             z: 1,
             axis: 5,
-            mat: 2,  // texture_index for Dirt
+            mat: 2, // texture_index for Dirt
             occlusion: 0xFF,
         },
         Surface {
@@ -217,7 +217,7 @@ fn surface_extraction() {
             y: 1,
             z: 1,
             axis: 5,
-            mat: 2,  // texture_index for Dirt
+            mat: 2, // texture_index for Dirt
             occlusion: 0xFF,
         },
         Surface {
@@ -225,7 +225,7 @@ fn surface_extraction() {
             y: 1,
             z: 1,
             axis: 5,
-            mat: 2,  // texture_index for Dirt
+            mat: 2, // texture_index for Dirt
             occlusion: 0xFF,
         },
     ] {

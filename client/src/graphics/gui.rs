@@ -5,10 +5,10 @@ use yakui::{
     textbox, widgets::Pad,
 };
 
-use common::{worldgen::WorldgenPreset, SimConfig};
 use common::worldgen::sample_enviro_at;
+use common::{SimConfig, worldgen::WorldgenPreset};
 
-use crate::{config::RawConfig, Sim};
+use crate::{Sim, config::RawConfig};
 
 pub struct GuiState {
     show_gui: bool,
@@ -196,10 +196,7 @@ impl ConfigPanel {
             .name
             .clone()
             .unwrap_or_else(|| Arc::<str>::from(whoami::username()));
-        let chunk_parallelism = raw
-            .chunk_load_parallelism
-            .unwrap_or(256)
-            .to_string();
+        let chunk_parallelism = raw.chunk_load_parallelism.unwrap_or(256).to_string();
         let server = raw.server.map(|addr| addr.to_string()).unwrap_or_default();
         let worldgen = match raw.local_simulation.worldgen {
             WorldgenPreset::Hyperbolic => WorldgenDescriptor::Hyperbolic,
@@ -365,11 +362,7 @@ impl ConfigPanel {
     }
 
     fn build_session_options(&mut self) -> Result<GuiAction, String> {
-        let name = self
-            .form
-            .name
-            .trim()
-            .to_string();
+        let name = self.form.name.trim().to_string();
         if name.is_empty() {
             return Err("Display name cannot be empty".into());
         }

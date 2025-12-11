@@ -509,10 +509,7 @@ impl Sim {
                         self.graph.populate_chunk(chunk, voxel_data);
                     } else {
                         let params = ChunkParams::new(&mut self.graph, chunk, self.cfg.worldgen);
-                        self.graph.populate_chunk(
-                            chunk,
-                            params.generate_voxels(),
-                        );
+                        self.graph.populate_chunk(chunk, params.generate_voxels());
                     }
                 }
             }
@@ -674,7 +671,8 @@ impl Sim {
             return;
         };
         if self.cfg.gameplay_enabled {
-            if block_update.new_tile_id != 0 { // 0 is Air
+            if block_update.new_tile_id != 0 {
+                // 0 is Air
                 let Some(consumed_entity_id) = block_update.consumed_entity else {
                     tracing::warn!("Tried to place block without consuming any entities");
                     return;
@@ -697,7 +695,8 @@ impl Sim {
                 }
                 self.destroy(consumed_entity);
             }
-            if old_tile_id != 0 { // 0 is Air
+            if old_tile_id != 0 {
+                // 0 is Air
                 let (produced_entity, _) = self.spawn((subject_node, old_tile_id));
                 self.add_to_inventory(subject, produced_entity);
             }

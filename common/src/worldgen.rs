@@ -17,25 +17,25 @@
 //!
 //! Rule of thumb: `1.0` equals one chunk side length; a single voxel is `1 / dimension` of that. Terrain “height” from
 //! enviro is converted to this distance space via division by `TERRAIN_SMOOTHNESS`.
-//! MOST OF THE FEATURES AND CONVENTIONS LISTED HERE ARE JUST FOR REFERENCE, 
+//! MOST OF THE FEATURES AND CONVENTIONS LISTED HERE ARE JUST FOR REFERENCE,
 //! AND ARE TO-BE-DEPRECATED ONCE BETTER TERRAIN GENERATION IS IMPLEMENTED.
 
 use rand::{Rng, SeedableRng, distr::Uniform};
 use rand_distr::Normal;
-use noise::{NoiseFn, Perlin};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     dodeca::{Side, Vertex},
     graph::{Graph, NodeId},
     margins,
-    math::{self, MIsometry, MPoint, MVector},
+    math::{MIsometry, MPoint, MVector},
     node::{ChunkId, VoxelData},
     plane::Plane,
     proto::Position as ProtoPosition,
     terraingen::VoronoiInfo,
     voxel_math::CoordAxis,
     world::{BlockID, BlockKind},
+    hyper_noise::{HyperbolicNoise, FbmConfig},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,7 +49,6 @@ impl Default for WorldgenPreset {
         WorldgenPreset::Hyperbolic
     }
 }
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum NodeStateKind {
     Sky,
@@ -110,44 +109,23 @@ pub struct NodeState {
     world_from_node: MIsometry<f32>,
 }
 impl NodeState {
-    pub fn root() -> Self {
+    pub fn root(graph: &Graph, node: NodeId) -> Self {
+        let world_from_node = MIsometry::identity();
+        let enviro = EnviroFactors::sample(graph.hash_of(node) as u64, &world_from_node);
         Self {
             kind: NodeStateKind::ROOT,
             surface: Plane::from(Side::A),
             road_state: NodeStateRoad::ROOT,
-            enviro: EnviroFactors {
-                max_elevation: 0.0,
-                temperature: 0.0,
-                rainfall: 0.0,
-                blockiness: 0.0,
-            },
-            world_from_node: MIsometry::identity(),
+            enviro,
+            world_from_node,
         }
     }
 
     pub fn child(&self, graph: &Graph, node: NodeId, side: Side) -> Self {
-        let mut d = graph.parents(node).map(|(s, n)| (s, graph.node_state(n)));
-        let enviro = match (d.next(), d.next()) {
-            (Some(_), None) => {
-                let parent_side = graph.primary_parent_side(node).unwrap();
-                let parent_node = graph.neighbor(node, parent_side).unwrap();
-                let parent_state = graph.node_state(parent_node);
-                let spice = graph.hash_of(node) as u64;
-                EnviroFactors::varied_from(parent_state.enviro, spice)
-            }
-            (Some((a_side, a_state)), Some((b_side, b_state))) => {
-                let ab_node = graph
-                    .neighbor(graph.neighbor(node, a_side).unwrap(), b_side)
-                    .unwrap();
-                let ab_state = graph.node_state(ab_node);
-                EnviroFactors::continue_from(a_state.enviro, b_state.enviro, ab_state.enviro)
-            }
-            _ => unreachable!(),
-        };
-
         let child_kind = self.kind.child(side);
         let child_road = self.road_state.child(side);
         let world_from_node = &self.world_from_node * side.reflection();
+        let enviro = EnviroFactors::sample(graph.hash_of(node) as u64, &world_from_node);
 
         Self {
             kind: child_kind,
@@ -261,14 +239,12 @@ pub struct ChunkParams {
     node_spice: u64,
     /// Transform from node-local space to global hyperbolic coordinates
     world_from_node: MIsometry<f32>,
-    /// Center of this chunk in global coordinates (Beltrami projection)
-    chunk_center: na::Vector3<f32>,
-    /// Basis spanning the local horizontal plane (east, north, up)
-    horizontal_basis: [na::Vector3<f32>; 3],
-    /// Approximate scale mapping one chunk edge along the plane
-    horizontal_scale: f32,
     /// Orientation of the chunk's up direction in voxel space
     orientation: ChunkOrientation,
+    /// Conversion from hyperbolic noise distances to approximate "block" units in the horizontal plane
+    hyper_block_scale: f64,
+    /// Conversion from hyperbolic noise distances to "block" units along the vertical axis
+    hyper_vertical_block_scale: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -341,31 +317,8 @@ impl ChunkParams {
         let state = graph.node_state(chunk.node);
         let dimension = graph.layout().dimension();
         let world_from_node = state.world_from_node().clone();
-        let chunk_center = chunk_point_world(
-            chunk.vertex,
-            &world_from_node,
-            na::Vector3::repeat(0.5),
-        );
-        let horizontal_basis = plane_basis(state.surface);
-        let horizontal_scale = {
-            let along_x = chunk_point_world(
-                chunk.vertex,
-                &world_from_node,
-                na::Vector3::new(1.0, 0.5, 0.5),
-            ) - chunk_point_world(
-                chunk.vertex,
-                &world_from_node,
-                na::Vector3::new(0.0, 0.5, 0.5),
-            );
-            let scale = along_x.dot(&horizontal_basis[0]).abs();
-            if scale <= f32::EPSILON {
-                f32::from(dimension)
-            } else {
-                scale
-            }
-        };
         let orientation = ChunkOrientation::from_surface(state.surface, chunk.vertex, dimension);
-        Self {
+        let mut params = Self {
             preset,
             dimension,
             chunk: chunk.vertex,
@@ -377,28 +330,105 @@ impl ChunkParams {
                 && ((state.road_state == East) || (state.road_state == West)),
             node_spice: graph.hash_of(chunk.node) as u64,
             world_from_node,
-            chunk_center,
-            horizontal_basis,
-            horizontal_scale,
             orientation,
-        }
+            hyper_block_scale: 1.0,
+            hyper_vertical_block_scale: 1.0,
+        };
+
+        params.hyper_block_scale = params.estimate_horizontal_block_scale();
+        params.hyper_vertical_block_scale = params.estimate_vertical_block_scale();
+        params
     }
 
     pub fn chunk(&self) -> Vertex {
         self.chunk
     }
 
-    pub fn world_point(&self, local: na::Vector3<f32>) -> na::Vector3<f32> {
-        chunk_point_world(self.chunk, &self.world_from_node, local)
+    /// Compute the world-space MPoint for a local chunk coordinate.
+    /// This gives a true hyperbolic point that is consistent across chunk boundaries.
+    fn world_mpoint(&self, local: na::Vector3<f32>) -> MPoint<f32> {
+        let node_space = self.chunk.chunk_to_node() * local.push(1.0);
+        let point = MVector::from(node_space).normalized_point();
+        &self.world_from_node * point
     }
 
-    fn horizontal_coords(&self, local: na::Vector3<f32>) -> na::Vector2<f32> {
-        let world = self.world_point(local);
-        let relative = world - self.chunk_center;
-        na::Vector2::new(
-            relative.dot(&self.horizontal_basis[0]) / self.horizontal_scale,
-            relative.dot(&self.horizontal_basis[1]) / self.horizontal_scale,
+    /// Compute globally consistent hyperbolic coordinates for noise sampling.
+    /// Uses signed hyperbolic distance from fixed reference planes through the origin.
+    /// Returns (x, z) coordinates that are continuous across chunk boundaries.
+    fn hyperbolic_noise_coords(&self, local: na::Vector3<f32>) -> na::Vector2<f64> {
+        let point = self.world_mpoint(local);
+        // Use signed distance from planes x=0 and z=0 in hyperbolic space.
+        // A plane through the origin with normal n has the property that
+        // the signed distance from point p is asinh(n · p) where · is mip.
+        // For x=0 plane, normal is (1,0,0,0), so distance = asinh(p.x)
+        // For z=0 plane, normal is (0,0,1,0), so distance = asinh(p.z)
+        let v: na::Vector4<f32> = point.into();
+        na::Vector2::new(v.x.asinh() as f64, v.z.asinh() as f64)
+    }
+
+    /// Compute 3D globally consistent hyperbolic coordinates for noise sampling.
+    /// Returns (x, y, z) coordinates that are continuous across chunk boundaries.
+    fn hyperbolic_noise_coords_3d(&self, local: na::Vector3<f32>) -> na::Vector3<f64> {
+        let point = self.world_mpoint(local);
+        let v: na::Vector4<f32> = point.into();
+        na::Vector3::new(v.x.asinh() as f64, v.y.asinh() as f64, v.z.asinh() as f64)
+    }
+
+    /// Hyperbolic noise coordinates scaled to approximate "block" units horizontally.
+    fn hyperbolic_block_coords(&self, local: na::Vector3<f32>) -> na::Vector2<f64> {
+        self.hyperbolic_noise_coords(local) * self.hyper_block_scale
+    }
+
+    /// Hyperbolic noise coordinates scaled to approximate "block" units in 3D.
+    fn hyperbolic_block_coords_3d(&self, local: na::Vector3<f32>) -> na::Vector3<f64> {
+        let coords = self.hyperbolic_noise_coords_3d(local);
+        na::Vector3::new(
+            coords.x * self.hyper_block_scale,
+            coords.y * self.hyper_vertical_block_scale,
+            coords.z * self.hyper_block_scale,
         )
+    }
+
+    fn estimate_horizontal_block_scale(&self) -> f64 {
+        let step = 1.0 / f32::from(self.dimension);
+        let center = na::Vector3::repeat(0.5);
+        let base = self.hyperbolic_noise_coords(center);
+        let axes = self.orientation.horizontal_axes();
+        let axis_count = axes.len() as f64;
+        let mut total = 0.0f64;
+        for axis in axes {
+            let mut offset = center;
+            offset[axis as usize] = (offset[axis as usize] + step).clamp(0.0, 1.0);
+            let delta = self.hyperbolic_noise_coords(offset) - base;
+            total += delta.norm();
+        }
+        let avg = total / axis_count.max(1.0);
+        if avg <= std::f64::EPSILON {
+            1.0
+        } else {
+            1.0 / avg
+        }
+    }
+
+    fn estimate_vertical_block_scale(&self) -> f64 {
+        let step = 1.0 / f32::from(self.dimension);
+        let center = na::Vector3::repeat(0.5);
+        let base = self.hyperbolic_noise_coords_3d(center);
+        let axis = self.orientation.up_axis() as usize;
+        let direction = if self.orientation.up_sign() >= 0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let mut offset = center;
+        offset[axis] = (offset[axis] + step * direction).clamp(0.0, 1.0);
+        let delta = self.hyperbolic_noise_coords_3d(offset) - base;
+        let dist = delta.norm();
+        if dist <= std::f64::EPSILON {
+            1.0
+        } else {
+            1.0 / dist
+        }
     }
 
     fn vertical_density_scale(&self) -> f32 {
@@ -418,13 +448,6 @@ impl ChunkParams {
     }
 
     fn generate_legacy_voxels(&self) -> VoxelData {
-        // Determine whether this chunk might contain a boundary between solid and void
-        let mut me_min = self.env.max_elevations[0];
-        let mut me_max = self.env.max_elevations[0];
-        for &me in &self.env.max_elevations[1..] {
-            me_min = me_min.min(me);
-            me_max = me_max.max(me);
-        }
         // Maximum difference between elevations at the center of a chunk and any other point in the chunk
         // TODO: Compute what this actually is, current value is a guess! Real one must be > 0.6
         // empirically.
@@ -432,20 +455,19 @@ impl ChunkParams {
         let center_elevation = self
             .surface
             .distance_to_chunk(self.chunk, &na::Vector3::repeat(0.5));
-        if (center_elevation - ELEVATION_MARGIN > me_max / TERRAIN_SMOOTHNESS)
-            && !(self.is_road || self.is_road_support)
-        {
-            // The whole chunk is above ground and not part of the road
+        let chunk_top = center_elevation - ELEVATION_MARGIN;
+        let chunk_bottom = center_elevation + ELEVATION_MARGIN;
+        if (chunk_bottom <= FLAT_SURFACE_HEIGHT) && !(self.is_road || self.is_road_support) {
+            // The whole chunk lies above the guiding plane
             return VoxelData::Solid(BlockKind::Air.id());
         }
 
-        if (center_elevation + ELEVATION_MARGIN < me_min / TERRAIN_SMOOTHNESS) && !self.is_road {
+        if (chunk_top >= FLAT_SURFACE_HEIGHT) && !self.is_road {
             // The whole chunk is underground
-            // TODO: More accurate VoxelData
             return VoxelData::Solid(BlockKind::Dirt.id());
         }
 
-    let mut voxels = VoxelData::Solid(BlockKind::Air.id());
+        let mut voxels = VoxelData::Solid(BlockKind::Air.id());
         let mut rng = rand_pcg::Pcg64Mcg::seed_from_u64(hash(self.node_spice, self.chunk as u64));
 
         self.generate_terrain(&mut voxels, &mut rng);
@@ -469,13 +491,7 @@ impl ChunkParams {
     /// Performs all terrain generation that can be done one voxel at a time and with
     /// only the containing chunk's surrounding nodes' envirofactors.
     fn generate_terrain(&self, voxels: &mut VoxelData, rng: &mut Pcg64Mcg) {
-        use noise::{NoiseFn, Perlin};
         let normal = Normal::new(0.0, 0.03).unwrap();
-        
-        // Minecraft-style 3D noise for caves and overhangs
-        let density_noise = Perlin::new(1337);
-        let cave_noise = Perlin::new(420);
-
         for (x, y, z) in VoxelCoords::new(self.dimension) {
             let coords = na::Vector3::new(x, y, z);
             let center = voxel_center(self.dimension, coords);
@@ -483,92 +499,21 @@ impl ChunkParams {
 
             let rain = trilerp(&self.env.rainfalls, trilerp_coords) + rng.sample(normal);
             let temp = trilerp(&self.env.temperatures, trilerp_coords) + rng.sample(normal);
-
-            // elev is calculated in multiple steps. The initial value elev_pre_terracing
-            // is used to calculate elev_pre_noise which is used to calculate elev.
-            let elev_pre_terracing = trilerp(&self.env.max_elevations, trilerp_coords);
-            let block = trilerp(&self.env.blockinesses, trilerp_coords);
             let voxel_elevation = self.surface.distance_to_chunk(self.chunk, &center);
-            let strength = 0.4 / (1.0 + math::sqr(voxel_elevation));
-            let terracing_small = terracing_diff(elev_pre_terracing, block, 5.0, strength, 2.0);
-            let terracing_big = terracing_diff(elev_pre_terracing, block, 15.0, strength, -1.0);
-            // Small and big terracing effects must not sum to more than 1,
-            // otherwise the terracing fails to be (nonstrictly) monotonic
-            // and the terrain gets trenches ringing around its cliffs.
-            let elev_pre_noise = elev_pre_terracing + 0.6 * terracing_small + 0.4 * terracing_big;
 
-            // initial value dist_pre_noise is the difference between the voxel's distance
-            // from the guiding plane and the voxel's calculated elev value. It represents
-            // how far from the terrain surface a voxel is.
-            let dist_pre_noise = elev_pre_noise / TERRAIN_SMOOTHNESS - voxel_elevation;
-
-            // adding noise allows interfaces between strata to be rough
-            let elev = elev_pre_noise + TERRAIN_SMOOTHNESS * rng.sample(normal);
-
-            // Final value of dist is calculated in this roundabout way for greater control
-            // over how noise in elev affects dist.
-            let mut dist = if dist_pre_noise > 0.0 {
-                // The .max(0.0) keeps the top of the ground smooth
-                // while still allowing the surface/general terrain interface to be rough
-                (elev / TERRAIN_SMOOTHNESS - voxel_elevation).max(0.0)
-            } else {
-                // Distance not updated for updated elevation if distance was originally
-                // negative. This ensures that no voxels that would have otherwise
-                // been void are changed to a material---so no floating dirt blocks.
-                dist_pre_noise
-            };
-            
-            // MINECRAFT-STYLE HYBRID: 2D base terrain + 3D density for caves/overhangs
-            // Minecraft uses 2D noise for the overall terrain shape, then 3D noise
-            // to add/remove material for caves, overhangs, and terrain features
-            
-            // Create world-space coordinates for noise sampling
-            // MUCH larger scale than before
-            let world_pos = center * 10.0;
-            
-            // 3D density noise - Minecraft style with multiple frequencies
-            // Lower frequencies = larger features
-            let density_3d = 
-                // Large-scale terrain deformation (overhangs, natural arches)
-                density_noise.get([world_pos.x as f64 * 0.015, world_pos.y as f64 * 0.015, world_pos.z as f64 * 0.015]) * 1.2 +
-                // Medium-scale detail
-                density_noise.get([world_pos.x as f64 * 0.04, world_pos.y as f64 * 0.04, world_pos.z as f64 * 0.04]) * 0.5 +
-                // Fine detail
-                density_noise.get([world_pos.x as f64 * 0.08, world_pos.y as f64 * 0.08, world_pos.z as f64 * 0.08]) * 0.25;
-            
-            // Cave noise - much larger scale for proper cave systems
-            let cave_density = cave_noise.get([
-                world_pos.x as f64 * 0.012,
-                world_pos.y as f64 * 0.012,
-                world_pos.z as f64 * 0.012
-            ]);
-            
-            // Apply 3D density modulation near the surface for overhangs and cliffs
-            // Minecraft applies 3D noise strongest near y=64 (mid-height)
-            if dist_pre_noise > -3.0 && dist_pre_noise < 8.0 {
-                // Surface zone: 3D noise creates overhangs, cliffs, and interesting terrain
-                // Strength increases near the surface
-                let surface_factor = 1.0 - (dist_pre_noise / 8.0).abs().min(1.0);
-                dist += density_3d as f32 * surface_factor * 3.5;
-            }
-            
-            // Cave carving: Minecraft-style 3D cave systems
-            // Carve caves underground when noise is in a specific range
-            if dist_pre_noise < -1.0 && cave_density.abs() < 0.2 {
-                // Creates winding cave tunnels
-                dist = (cave_density.abs() as f32 - 0.2) * 5.0;
+            if voxel_elevation < FLAT_SURFACE_HEIGHT {
+                continue;
             }
 
-            if dist >= 0.0 {
-                let voxel_mat = VoronoiInfo::terraingen_voronoi(
-                    f64::from(elev),
-                    f64::from(rain),
-                    f64::from(temp),
-                    f64::from(dist),
-                );
-                voxels.data_mut(self.dimension)[index(self.dimension, coords)] =
-                    voxel_mat.into();
-            }
+            let dist = voxel_elevation - FLAT_SURFACE_HEIGHT;
+            let voxel_mat = VoronoiInfo::terraingen_voronoi(
+                f64::from(FLAT_BASE_ELEVATION),
+                f64::from(rain),
+                f64::from(temp),
+                f64::from(dist),
+            );
+
+            voxels.data_mut(self.dimension)[index(self.dimension, coords)] = voxel_mat.into();
         }
     }
 
@@ -672,8 +617,10 @@ impl ChunkParams {
             // Only plant a tree if there is exactly one adjacent block of dirt or grass
             if num_void_neighbors == 5 {
                 for i in neighbor_data.iter() {
-                    if (i.block_id == BlockKind::Dirt.id()) || (i.block_id == BlockKind::Grass.id()) {
-                        voxels.data_mut(self.dimension)[voxel_of_interest_index] = BlockKind::Log.id();
+                    if (i.block_id == BlockKind::Dirt.id()) || (i.block_id == BlockKind::Grass.id())
+                    {
+                        voxels.data_mut(self.dimension)[voxel_of_interest_index] =
+                            BlockKind::Log.id();
                         let leaf_location = index(self.dimension, i.coords_opposing);
                         voxels.data_mut(self.dimension)[leaf_location] = BlockKind::Leaves.id();
                     }
@@ -721,12 +668,34 @@ impl ChunkParams {
     }
 }
 
+#[allow(dead_code)]
 const TERRAIN_SMOOTHNESS: f32 = 10.0;
+#[allow(dead_code)]
+const FLAT_MAX_ELEVATION: f32 = TERRAIN_SMOOTHNESS * 2.0;
+#[allow(dead_code)]
+const FLAT_BASE_ELEVATION: f32 = 0.0;
+#[allow(dead_code)]
+const FLAT_SURFACE_HEIGHT: f32 = 0.0;
 
 struct NeighborData {
     coords_opposing: na::Vector3<u8>,
     block_id: BlockID,
 }
+
+const ENVIRO_TEMP_FREQ: f64 = 0.02;
+const ENVIRO_RAIN_FREQ: f64 = 0.03;
+const ENVIRO_HEIGHT_FREQ: f64 = 0.01;
+const ENVIRO_BLOCK_FREQ: f64 = 0.05;
+const ENVIRO_HEIGHT_VARIANCE: f32 = 48.0;
+const ENVIRO_FBM: FbmConfig = FbmConfig {
+    octaves: 5,
+    lacunarity: 2.0,
+    gain: 0.5,
+};
+const ENVIRO_SEED_TEMP: u64 = 0x5eed_5eed_a5a5_0001;
+const ENVIRO_SEED_RAIN: u64 = 0xface_b00c_baad_f00d;
+const ENVIRO_SEED_HEIGHT: u64 = 0x91ce_d9a1_1234_5678;
+const ENVIRO_SEED_BLOCK: u64 = 0xfeed_babe_0dd5_1dea;
 
 #[derive(Copy, Clone)]
 struct EnviroFactors {
@@ -736,81 +705,24 @@ struct EnviroFactors {
     blockiness: f32,
 }
 impl EnviroFactors {
-    fn varied_from(parent: Self, spice: u64) -> Self {
-        let mut rng = rand_pcg::Pcg64Mcg::seed_from_u64(spice);
-        let unif = Uniform::new_inclusive(-1.0, 1.0).unwrap();
-        
-        // Minecraft uses 2D noise for base terrain, 3D noise for caves/overhangs
-        // This generates the base elevation using 2D-style noise
-        let perlin1 = Perlin::new(42);
-        let perlin2 = Perlin::new(43);
-        
-        // Create pseudo-3D coordinates from the node hash
-        // MUCH larger scale for continent-sized features
-        let base_scale = 0.002; // Even lower frequency = bigger features
-        let x = (spice % 10000) as f64 * base_scale;
-        let y = ((spice / 10000) % 10000) as f64 * base_scale;
-        let z = (spice / 100000000) as f64 * base_scale;
-        
-        // Base terrain elevation (Minecraft's "continentalness" equivalent)
-        let octaves = 5;
-        let lacunarity = 2.0;
-        let persistence = 0.5;
-        
-        let mut elevation = 0.0;
-        let mut amplitude = 1.0;
-        let mut frequency = 1.0;
-        let mut max_value = 0.0;
-        
-        for _octave in 0..octaves {
-            elevation += perlin1.get([x * frequency, y * frequency, z * frequency]) * amplitude;
-            max_value += amplitude;
-            amplitude *= persistence;
-            frequency *= lacunarity;
-        }
-        
-        elevation /= max_value;
-        
-        // Add "erosion" - controls whether terrain is mountainous or flat
-        let erosion = perlin2.get([x * 0.8, y * 0.8, z * 0.8]);
-        
-        // Combine elevation and erosion (Minecraft's approach)
-        let base_height = elevation * 0.6 + erosion * 0.4;
-        
-        // Shape terrain: create distinct biomes
-        let shaped_height = if base_height > 0.3 {
-            // High mountains
-            0.3 + (base_height - 0.3).powf(1.3) * 3.0
-        } else if base_height > 0.0 {
-            // Hills and plains
-            base_height * 0.8
-        } else if base_height > -0.3 {
-            // Low areas
-            base_height * 0.4
-        } else {
-            // Deep valleys
-            -0.12 + (base_height + 0.3) * 0.2
-        };
-        
-        // Add variation
-        let random_variation = rng.sample(Normal::new(0.0, 1.5).unwrap());
-        
-        // Scale to block heights - larger range for more dramatic terrain
-        let max_elevation = shaped_height as f32 * 55.0 + random_variation;
+    fn sample(spice: u64, world_from_node: &MIsometry<f32>) -> Self {
+        let coords3 = hyperbolic_coords_from_transform(world_from_node);
+        let coords2 = na::Vector2::new(coords3.x, coords3.z);
+
+        let temp_noise = HyperbolicNoise::new(ENVIRO_SEED_TEMP ^ spice)
+            .fbm2(coords2 * ENVIRO_TEMP_FREQ, ENVIRO_FBM);
+        let rain_noise = HyperbolicNoise::new(ENVIRO_SEED_RAIN ^ spice)
+            .fbm2(coords2 * ENVIRO_RAIN_FREQ, ENVIRO_FBM);
+        let height_noise = HyperbolicNoise::new(ENVIRO_SEED_HEIGHT ^ spice)
+            .fbm2(coords2 * ENVIRO_HEIGHT_FREQ, ENVIRO_FBM);
+        let block_noise = HyperbolicNoise::new(ENVIRO_SEED_BLOCK ^ spice)
+            .fbm3(coords3 * ENVIRO_BLOCK_FREQ, ENVIRO_FBM);
 
         Self {
-            max_elevation,
-            temperature: parent.temperature + rng.sample(unif),
-            rainfall: parent.rainfall + rng.sample(unif),
-            blockiness: parent.blockiness + rng.sample(unif),
-        }
-    }
-    fn continue_from(a: Self, b: Self, ab: Self) -> Self {
-        Self {
-            max_elevation: a.max_elevation + (b.max_elevation - ab.max_elevation),
-            temperature: a.temperature + (b.temperature - ab.temperature),
-            rainfall: a.rainfall + (b.rainfall - ab.rainfall),
-            blockiness: a.blockiness + (b.blockiness - ab.blockiness),
+            max_elevation: (height_noise as f32) * ENVIRO_HEIGHT_VARIANCE,
+            temperature: normalize_noise(temp_noise),
+            rainfall: normalize_noise(rain_noise),
+            blockiness: normalize_noise(block_noise),
         }
     }
 }
@@ -828,7 +740,18 @@ struct ChunkIncidentEnviroFactors {
     max_elevations: [f32; 8],
     temperatures: [f32; 8],
     rainfalls: [f32; 8],
+    #[allow(dead_code)]
     blockinesses: [f32; 8],
+}
+
+fn hyperbolic_coords_from_transform(transform: &MIsometry<f32>) -> na::Vector3<f64> {
+    let point = transform * MPoint::origin();
+    let v4: na::Vector4<f32> = point.into();
+    na::Vector3::new(v4.x.asinh() as f64, v4.y.asinh() as f64, v4.z.asinh() as f64)
+}
+
+fn normalize_noise(value: f64) -> f32 {
+    ((value as f32) * 0.5 + 0.5).clamp(0.0, 1.0)
 }
 
 /// Returns the max_elevation values for the nodes that are incident to this chunk,
@@ -880,33 +803,6 @@ fn trilerp<N: na::RealField + Copy>(
     )
 }
 
-/// serp interpolates between two values v0 and v1 over the interval [0, 1] by yielding
-/// v0 for [0, threshold], v1 for [1-threshold, 1], and linear interpolation in between
-/// such that the overall shape is an S-shaped piecewise function.
-/// threshold should be between 0 and 0.5.
-fn serp<N: na::RealField + Copy>(v0: N, v1: N, t: N, threshold: N) -> N {
-    if t < threshold {
-        v0
-    } else if t < (N::one() - threshold) {
-        let s = (t - threshold) / ((N::one() - threshold) - threshold);
-        v0 * (N::one() - s) + v1 * s
-    } else {
-        v1
-    }
-}
-
-/// Intended to produce a number that is added to elev_raw.
-/// block is a real number, threshold is in (0, strength) via a logistic function
-/// scale controls wavelength and amplitude. It is not 1:1 to the number of blocks in a period.
-/// strength represents extremity of terracing effect. Sensible values are in (0, 0.5).
-/// The greater the value of limiter, the stronger the bias of threshold towards 0.
-fn terracing_diff(elev_raw: f32, block: f32, scale: f32, strength: f32, limiter: f32) -> f32 {
-    let threshold: f32 = strength / (1.0 + libm::powf(2.0, limiter - block));
-    let elev_floor = libm::floorf(elev_raw / scale);
-    let elev_rem = elev_raw / scale - elev_floor;
-    scale * elev_floor + serp(0.0, scale, elev_rem, threshold) - elev_raw
-}
-
 /// Location of the center of a voxel in a unit chunk
 fn voxel_center(dimension: u8, voxel: na::Vector3<u8>) -> na::Vector3<f32> {
     voxel.map(|x| f32::from(x) + 0.5) / f32::from(dimension)
@@ -927,45 +823,9 @@ fn hash(a: u64, b: u64) -> u64 {
         .wrapping_mul(0x517c_c1b7_2722_0a95)
 }
 
-fn chunk_point_world(
-    vertex: Vertex,
-    world_from_node: &MIsometry<f32>,
-    local: na::Vector3<f32>,
-) -> na::Vector3<f32> {
-    let node_space = vertex.chunk_to_node() * local.push(1.0);
-    let point = MVector::from(node_space).normalized_point();
-    minkowski_to_vec3(world_from_node * point)
-}
-
-fn minkowski_to_vec3(point: MPoint<f32>) -> na::Vector3<f32> {
-    let v: na::Vector4<f32> = point.into();
-    let inv_w = if v.w.abs() > f32::EPSILON {
-        v.w.recip()
-    } else {
-        1.0
-    };
-    na::Vector3::new(v.x * inv_w, v.y * inv_w, v.z * inv_w)
-}
-
-fn plane_basis(surface: Plane) -> [na::Vector3<f32>; 3] {
-    let normal_vec: na::Vector4<f32> = (*surface.scaled_normal()).into();
-    let mut up = na::Vector3::new(normal_vec.x, normal_vec.y, normal_vec.z);
-    if up.norm_squared() < 1.0e-6 {
-        up = na::Vector3::new(0.0, 1.0, 0.0);
-    }
-    up = up.normalize();
-    let mut east = up.cross(&na::Vector3::new(0.0, 0.0, 1.0));
-    if east.norm_squared() < 1.0e-6 {
-        east = up.cross(&na::Vector3::new(1.0, 0.0, 0.0));
-    }
-    east = east.normalize();
-    let north = up.cross(&east);
-    [east, north, up]
-}
-
 mod remcpe {
     use super::*;
-    use noise::Perlin;
+    use crate::hyper_noise::{FbmConfig, HyperbolicNoise};
     use rand::{Rng, SeedableRng};
     use rand_pcg::Pcg64Mcg;
 
@@ -975,14 +835,18 @@ mod remcpe {
     const MC_MAX_HEIGHT: f32 = 96.0;
     const MC_BEDROCK_FLOOR: f32 = -96.0;
     const HEIGHT_MULTIPLIER: f32 = 1.25;
-    const CONTINENTAL_FREQ: f64 = 1.0 / 550.0;
-    const DETAIL_FREQ: f64 = 1.0 / 85.0;
-    const RIDGE_FREQ: f64 = 1.0 / 220.0;
-    const TEMP_FREQ: f64 = 1.0 / 700.0;
-    const RAIN_FREQ: f64 = 1.0 / 640.0;
-    const SURF_FREQ: f64 = 1.0 / 18.0;
-    const CAVE_HORIZ_FREQ: f64 = 1.0 / 28.0;
-    const CAVE_VERT_FREQ: f64 = 1.0 / 32.0;
+    #[allow(dead_code)]
+    const FLAT_COLUMN_HEIGHT: f32 = 0.0;
+    const DEFAULT_SURFACE_DEPTH_MIN: u8 = 1;
+    const DEFAULT_SURFACE_DEPTH_MAX: u8 = 3;
+    const CAVE_PROBABILITY: f32 = 0.0125;
+    const HEIGHT_NOISE_BASE_FREQ: f64 = 1.0 / 64.0;
+    const HEIGHT_NOISE_AMPLITUDE: f32 = 24.0;
+    const HEIGHT_NOISE_FBM: FbmConfig = FbmConfig {
+        octaves: 4,
+        lacunarity: 2.0,
+        gain: 0.5,
+    };
 
     fn chunk_height_span(params: &ChunkParams) -> f32 {
         f32::from(params.dimension) * HEIGHT_MULTIPLIER
@@ -1037,9 +901,7 @@ mod remcpe {
         }
 
         fn idx(params: &ChunkParams, coords: na::Vector3<u8>) -> usize {
-            params
-                .orientation()
-                .column_index(params.dimension, coords)
+            params.orientation().column_index(params.dimension, coords)
         }
 
         fn idx_components(params: &ChunkParams, axis0: u8, axis1: u8) -> usize {
@@ -1129,17 +991,12 @@ mod remcpe {
     }
 
     fn build_columns(params: &ChunkParams) -> Vec<ColumnData> {
-    let dimension = params.dimension as usize;
-    let mut columns = vec![ColumnData::new(); dimension * dimension];
-    let dim_f = f32::from(params.dimension);
-    let orientation = params.orientation();
-    let [axis0, axis1] = orientation.horizontal_axes();
-        let continental = Perlin::new(WORLD_SEED);
-        let detail = Perlin::new(WORLD_SEED ^ 0x9e37);
-        let ridge = Perlin::new(WORLD_SEED ^ 0x4d2);
-        let temp_noise = Perlin::new(WORLD_SEED ^ 0x6ac1);
-        let rain_noise = Perlin::new(WORLD_SEED ^ 0x35a7);
-        let surf_noise = Perlin::new(WORLD_SEED ^ 0x8e21);
+        let dimension = params.dimension as usize;
+        let mut columns = vec![ColumnData::new(); dimension * dimension];
+        let dim_f = f32::from(params.dimension);
+        let orientation = params.orientation();
+        let [axis0, axis1] = orientation.horizontal_axes();
+        let noise = HyperbolicNoise::new(WORLD_SEED as u64);
 
         for a in 0..params.dimension {
             for b in 0..params.dimension {
@@ -1147,32 +1004,39 @@ mod remcpe {
                 let mut local = na::Vector3::repeat(0.5);
                 local[axis0 as usize] = (f32::from(a) + 0.5) / dim_f;
                 local[axis1 as usize] = (f32::from(b) + 0.5) / dim_f;
-                let horizontal = params.horizontal_coords(local);
-                let hx = horizontal.x as f64;
-                let hz = horizontal.y as f64;
-                let continental_val = continental.get([hx * CONTINENTAL_FREQ, hz * CONTINENTAL_FREQ]) as f32;
-                let detail_val = detail.get([hx * DETAIL_FREQ, hz * DETAIL_FREQ]) as f32;
-                let ridge_val = ridge.get([hx * RIDGE_FREQ, hz * RIDGE_FREQ]) as f32;
-                let temp = ((temp_noise.get([hx * TEMP_FREQ, hz * TEMP_FREQ]) as f32) * 0.4 + 0.6)
-                    .clamp(0.0, 1.0);
-                let rain = ((rain_noise.get([hx * RAIN_FREQ, hz * RAIN_FREQ]) as f32) * 0.5 + 0.5)
-                    .clamp(0.0, 1.0);
+                let trilerp_coords = local.map(|x| (1.0 - x) * 0.5);
+                let hyper_coords = params.hyperbolic_block_coords(local);
+                let hx = hyper_coords.x as f32;
+                let hz = hyper_coords.y as f32;
+                let noise_coords = hyper_coords * HEIGHT_NOISE_BASE_FREQ;
+                let height_variation = noise.fbm2(noise_coords, HEIGHT_NOISE_FBM) as f32;
+                let env_temp = trilerp(&params.env.temperatures, trilerp_coords).clamp(0.0, 1.0);
+                let env_rain = trilerp(&params.env.rainfalls, trilerp_coords).clamp(0.0, 1.0);
+                let env_height = trilerp(&params.env.max_elevations, trilerp_coords);
+
+                let seed = hash(
+                    params.node_spice,
+                    hash(WORLD_SEED as u64, hash(a as u64, b as u64)),
+                );
+                let mut column_rng = Pcg64Mcg::seed_from_u64(seed);
+                let temp = (env_temp + column_rng.random_range(-0.025..0.025)).clamp(0.0, 1.0);
+                let rain = (env_rain + column_rng.random_range(-0.05..0.05)).clamp(0.0, 1.0);
                 let biome = BiomeKind::classify(temp, rain);
-                let mut height = continental_val * 48.0 + detail_val * 8.0
-                    + ridge_val.abs() * 18.0
-                    + biome.height_offset();
+                let mut height = env_height + biome.height_offset();
+                height += height_variation * HEIGHT_NOISE_AMPLITUDE;
                 height = height.clamp(MC_MIN_HEIGHT, MC_MAX_HEIGHT);
                 let scaled_height = scale_height_to_chunk(params, height);
-                let surface_depth = ((surf_noise.get([hx * SURF_FREQ, hz * SURF_FREQ]) as f32 + 1.0)
-                    * 1.5
-                    + 1.0) as u8;
+                let surface_depth = column_rng
+                    .random_range(DEFAULT_SURFACE_DEPTH_MIN..=DEFAULT_SURFACE_DEPTH_MAX)
+                    .max(1);
+
                 let mut column = ColumnData::new();
-                column.horizontal = horizontal;
+                column.horizontal = na::Vector2::new(hx, hz);
                 column.height = scaled_height;
                 column.biome = biome;
                 column.top_block = biome.top_block();
                 column.filler_block = biome.filler_block();
-                column.surface_depth = surface_depth.max(1);
+                column.surface_depth = surface_depth;
                 column.freeze_water = biome.freeze_water();
                 column.vegetation_bias = rain;
                 columns[idx] = column;
@@ -1182,11 +1046,7 @@ mod remcpe {
         columns
     }
 
-    fn fill_base_layers(
-        params: &ChunkParams,
-        voxels: &mut [BlockID],
-        columns: &mut [ColumnData],
-    ) {
+    fn fill_base_layers(params: &ChunkParams, voxels: &mut [BlockID], columns: &mut [ColumnData]) {
         let mut rng = Pcg64Mcg::seed_from_u64(params.node_spice);
         let bedrock_floor = scale_height_to_chunk(params, MC_BEDROCK_FLOOR);
         let bedrock_variance = scale_height_to_chunk(params, 4.0);
@@ -1196,13 +1056,11 @@ mod remcpe {
             let column_idx = ColumnData::idx(params, coords);
             let column = &mut columns[column_idx];
             let center = voxel_center(params.dimension, coords);
-            let block_height = -params
-                .surface
-                .distance_to_chunk(params.chunk, &center)
+            let block_height = -params.surface.distance_to_chunk(params.chunk, &center)
                 * f32::from(params.dimension);
             let mut block = BlockKind::Air.id();
 
-            if block_height <= bedrock_floor + rng.gen_range(0.0..bedrock_variance) {
+            if block_height <= bedrock_floor + rng.random_range(0.0..bedrock_variance) {
                 block = BlockKind::Bedrock.id();
             } else if block_height <= column.height {
                 let depth = column.height - block_height;
@@ -1232,27 +1090,29 @@ mod remcpe {
     }
 
     fn carve_caves(params: &ChunkParams, voxels: &mut [BlockID], columns: &[ColumnData]) {
-        let cave_noise = Perlin::new(WORLD_SEED ^ 0xacab);
         let min_cave_height = scale_height_to_chunk(params, MC_MIN_HEIGHT + 4.0);
         for (coords_x, coords_y, coords_z) in VoxelCoords::new(params.dimension) {
             let coords = na::Vector3::new(coords_x, coords_y, coords_z);
             let column_idx = ColumnData::idx(params, coords);
             let column = &columns[column_idx];
             let center = voxel_center(params.dimension, coords);
-            let block_height = -params
-                .surface
-                .distance_to_chunk(params.chunk, &center)
+            let block_height = -params.surface.distance_to_chunk(params.chunk, &center)
                 * f32::from(params.dimension);
             if block_height > column.height || block_height < min_cave_height {
                 continue;
             }
-            let horizontal = column.horizontal;
-            let noise_val = cave_noise.get([
-                horizontal.x as f64 * CAVE_HORIZ_FREQ,
-                block_height as f64 * CAVE_VERT_FREQ,
-                horizontal.y as f64 * CAVE_HORIZ_FREQ,
-            ]) as f32;
-            if noise_val > 0.55 {
+
+            let hyper_coords = params.hyperbolic_block_coords_3d(center);
+            let hx_bits = hyper_coords.x.to_bits() as u64;
+            let hy_bits = hyper_coords.y.to_bits() as u64;
+            let hz_bits = hyper_coords.z.to_bits() as u64;
+            let coord_hash = hash(
+                hx_bits ^ hy_bits,
+                hz_bits ^ hash(coords_x as u64, coords_y as u64),
+            );
+            let sample_seed = hash(params.node_spice, hash(WORLD_SEED as u64, coord_hash));
+            let carve_value = ((sample_seed >> 16) & 0xffff_ffff) as f32 / u32::MAX as f32;
+            if carve_value < CAVE_PROBABILITY {
                 let idx = index(params.dimension, coords);
                 match voxels[idx] {
                     0 => {}
@@ -1336,13 +1196,13 @@ mod remcpe {
             let scaled_attempts = cfg.attempts as f32 * density_scale;
             let mut attempts = scaled_attempts.floor() as u32;
             let fractional = scaled_attempts - attempts as f32;
-            if fractional > 0.0 && rng.gen_bool(fractional as f64) {
+            if fractional > 0.0 && rng.random_bool(fractional as f64) {
                 attempts += 1;
             }
             for _ in 0..attempts {
-                let x = rng.gen_range(0..params.dimension);
-                let z = rng.gen_range(0..params.dimension);
-                let y = rng.gen_range(0..params.dimension);
+                let x = rng.random_range(0..params.dimension);
+                let z = rng.random_range(0..params.dimension);
+                let y = rng.random_range(0..params.dimension);
                 let coords = na::Vector3::new(x, y, z);
                 let height = column_height(params, coords);
                 if height < min_height || height > max_height {
@@ -1364,9 +1224,9 @@ mod remcpe {
         let dimension = params.dimension;
         for _ in 0..cluster {
             let offset = [
-                rng.gen_range(-1..=1),
-                rng.gen_range(-1..=1),
-                rng.gen_range(-1..=1),
+                rng.random_range(-1..=1),
+                rng.random_range(-1..=1),
+                rng.random_range(-1..=1),
             ];
             let mut coords = start;
             for axis in 0..3 {
@@ -1385,10 +1245,7 @@ mod remcpe {
 
     fn column_height(params: &ChunkParams, coords: na::Vector3<u8>) -> f32 {
         let center = voxel_center(params.dimension, coords);
-        -params
-            .surface
-            .distance_to_chunk(params.chunk, &center)
-            * f32::from(params.dimension)
+        -params.surface.distance_to_chunk(params.chunk, &center) * f32::from(params.dimension)
     }
 
     fn populate_surface_features(
@@ -1396,7 +1253,8 @@ mod remcpe {
         voxels: &mut [BlockID],
         columns: &mut [ColumnData],
     ) {
-        let mut rng = Pcg64Mcg::seed_from_u64(hash(params.node_spice, params.chunk as u64 ^ 0xfeed));
+        let mut rng =
+            Pcg64Mcg::seed_from_u64(hash(params.node_spice, params.chunk as u64 ^ 0xfeed));
         let density_scale = params.vertical_density_scale().clamp(0.01, 1.0);
         for a in 0..params.dimension {
             for b in 0..params.dimension {
@@ -1409,27 +1267,27 @@ mod remcpe {
                 match column.biome {
                     BiomeKind::Desert => {
                         let cactus_prob = (0.05 * density_scale).min(1.0);
-                        if rng.gen_bool(cactus_prob as f64) {
-                            place_cactus(params, voxels, top, rng.gen_range(2..5));
+                        if rng.random_bool(cactus_prob as f64) {
+                            place_cactus(params, voxels, top, rng.random_range(2..5));
                         }
                     }
                     _ => {
                         if column.biome.tree_weight() > 0 {
                             let base_prob = column.biome.tree_weight() as f32 / 10.0;
                             let tree_prob = (base_prob * density_scale).clamp(0.0, 1.0);
-                            if rng.gen_bool(tree_prob as f64) {
+                            if rng.random_bool(tree_prob as f64) {
                                 let _ = place_tree(params, voxels, top, &mut rng);
                                 continue;
                             }
                         }
                         let flower_prob = (0.05 * density_scale).min(1.0);
-                        if rng.gen_bool(flower_prob as f64) {
+                        if rng.random_bool(flower_prob as f64) {
                             place_flower(params, voxels, top);
                             continue;
                         }
                         let mushroom_prob = (0.03 * density_scale).min(1.0);
-                        if rng.gen_bool(mushroom_prob as f64) {
-                            place_mushroom(params, voxels, top, rng.gen_bool(0.5));
+                        if rng.random_bool(mushroom_prob as f64) {
+                            place_mushroom(params, voxels, top, rng.random_bool(0.5));
                         }
                     }
                 }
@@ -1443,7 +1301,7 @@ mod remcpe {
         base: na::Vector3<u8>,
         rng: &mut Pcg64Mcg,
     ) -> bool {
-        let height = rng.gen_range(4..7);
+        let height = rng.random_range(4..7);
         let orientation = params.orientation();
         if !can_extend_along_up(params.dimension, base, &orientation, height as i32 + 2) {
             return false;
@@ -1494,7 +1352,12 @@ mod remcpe {
         true
     }
 
-    fn place_cactus(params: &ChunkParams, voxels: &mut [BlockID], base: na::Vector3<u8>, height: u8) {
+    fn place_cactus(
+        params: &ChunkParams,
+        voxels: &mut [BlockID],
+        base: na::Vector3<u8>,
+        height: u8,
+    ) {
         let orientation = params.orientation();
         if !can_extend_along_up(params.dimension, base, &orientation, height as i32 + 1) {
             return;
@@ -1597,8 +1460,13 @@ mod remcpe {
 mod test {
     use super::*;
     use approx::*;
+    use crate::{
+        hyper_noise::HyperbolicNoise,
+        voxel_math::{CoordAxis, CoordSign},
+    };
 
     const CHUNK_SIZE: u8 = 12;
+    const HEIGHT_BASE_FREQ: f64 = 1.0 / 64.0;
 
     #[test]
     fn chunk_indexing_origin() {
@@ -1800,5 +1668,185 @@ mod test {
             let index = z as usize + y as usize * dimension + x as usize * dimension.pow(2);
             assert!(counter == index);
         }
+    }
+
+    fn convert_local_between_vertices(
+        from: Vertex,
+        to: Vertex,
+        local: na::Vector3<f32>,
+    ) -> na::Vector3<f32> {
+        let mut point = from.chunk_to_node_f64()
+            * na::Vector4::new(local.x as f64, local.y as f64, local.z as f64, 1.0);
+        point /= point.w;
+        let mut converted = to.node_to_chunk_f64() * point;
+        converted /= converted.w;
+        na::Vector3::new(converted.x as f32, converted.y as f32, converted.z as f32)
+    }
+
+    #[test]
+    fn hyperbolic_noise_continuity_across_chunks() {
+        let mut graph = Graph::new(CHUNK_SIZE);
+        let chunk_a = ChunkId::new(NodeId::ROOT, Vertex::A);
+        let chunk_b = graph
+            .get_chunk_neighbor(chunk_a, CoordAxis::X, CoordSign::Plus)
+            .expect("expected adjacent chunk");
+        let params_a = ChunkParams::new(&mut graph, chunk_a, WorldgenPreset::Hyperbolic);
+        let params_b = ChunkParams::new(&mut graph, chunk_b, WorldgenPreset::Hyperbolic);
+
+        // Center of the shared face between the two chunks.
+        let local_a = na::Vector3::new(1.0, 0.5, 0.5);
+        let local_b = convert_local_between_vertices(chunk_a.vertex, chunk_b.vertex, local_a);
+        assert!(
+            local_b.iter().all(|c| (-1e-4..=1.0 + 1e-4).contains(c)),
+            "converted local coords outside chunk: {:?}",
+            local_b
+        );
+
+        let hyper_a = params_a.hyperbolic_noise_coords(local_a);
+        let hyper_b = params_b.hyperbolic_noise_coords(local_b);
+        let noise = HyperbolicNoise::new(0x5eed_5eed);
+        let sample_a = noise.sample2(hyper_a);
+        let sample_b = noise.sample2(hyper_b);
+        assert!(
+            (sample_a - sample_b).abs() < 1e-6,
+            "noise discontinuity detected: {sample_a} vs {sample_b}"
+        );
+    }
+
+    fn assert_face_continuity(
+        params_a: &ChunkParams,
+        params_b: &ChunkParams,
+        chunk_a: ChunkId,
+        chunk_b: ChunkId,
+        axis: CoordAxis,
+        sign: CoordSign,
+    ) {
+        const GRID_STEPS: usize = 6;
+        const EPS: f64 = 1e-6;
+        let mut base = [0.5f32; 3];
+        base[axis as usize] = if matches!(sign, CoordSign::Plus) { 1.0 } else { 0.0 };
+        let [axis_u, axis_v] = axis.other_axes();
+        let noise = HyperbolicNoise::new(0x5eed_5eed);
+
+        for i in 0..=GRID_STEPS {
+            for j in 0..=GRID_STEPS {
+                let mut local_a = na::Vector3::new(base[0], base[1], base[2]);
+                local_a[axis_u as usize] = i as f32 / GRID_STEPS as f32;
+                local_a[axis_v as usize] = j as f32 / GRID_STEPS as f32;
+
+                let mut local_b = convert_local_between_vertices(chunk_a.vertex, chunk_b.vertex, local_a);
+                assert!(
+                    local_b
+                        .iter()
+                        .all(|c| (-1e-3..=1.0 + 1e-3).contains(c)),
+                    "converted local coords outside chunk: {:?}",
+                    local_b
+                );
+                local_b = local_b.map(|c| c.clamp(0.0, 1.0));
+
+                let hyper2_a = params_a.hyperbolic_noise_coords(local_a);
+                let hyper2_b = params_b.hyperbolic_noise_coords(local_b);
+                assert!(
+                    (hyper2_a - hyper2_b).norm() < 1e-6,
+                    "2D noise coords diverged across face: {:?} vs {:?}",
+                    hyper2_a,
+                    hyper2_b
+                );
+                let hyper3_a = params_a.hyperbolic_noise_coords_3d(local_a);
+                let hyper3_b = params_b.hyperbolic_noise_coords_3d(local_b);
+                assert!(
+                    (hyper3_a - hyper3_b).norm() < 1e-6,
+                    "3D noise coords diverged across face"
+                );
+
+                let block2_a = params_a.hyperbolic_block_coords(local_a);
+                let block2_b = params_b.hyperbolic_block_coords(local_b);
+                assert!(
+                    (block2_a - block2_b).norm() < 1e-5,
+                    "block coords diverged across face"
+                );
+                let block3_a = params_a.hyperbolic_block_coords_3d(local_a);
+                let block3_b = params_b.hyperbolic_block_coords_3d(local_b);
+                assert!(
+                    (block3_a - block3_b).norm() < 1e-5,
+                    "block 3d coords diverged across face"
+                );
+
+                let sample2_a = noise.sample2(hyper2_a);
+                let sample2_b = noise.sample2(hyper2_b);
+                assert!(
+                    (sample2_a - sample2_b).abs() < EPS,
+                    "2D noise sample discontinuity: {sample2_a} vs {sample2_b}"
+                );
+
+                let sample3_a = noise.sample3(hyper3_a);
+                let sample3_b = noise.sample3(hyper3_b);
+                assert!(
+                    (sample3_a - sample3_b).abs() < EPS,
+                    "3D noise sample discontinuity: {sample3_a} vs {sample3_b}"
+                );
+
+                let height_a = noise.sample2(block2_a * HEIGHT_BASE_FREQ);
+                let height_b = noise.sample2(block2_b * HEIGHT_BASE_FREQ);
+                assert!(
+                    (height_a - height_b).abs() < EPS,
+                    "height noise discontinuity: {height_a} vs {height_b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "fails until hyperbolic noise continuity across chunk faces is fixed"]
+    fn hyperbolic_noise_face_stress_test() {
+        const STRIP_STEPS: usize = 5;
+        let mut graph = Graph::new(CHUNK_SIZE);
+
+        for axis in CoordAxis::iter() {
+            for sign in CoordSign::iter() {
+                let mut current = ChunkId::new(NodeId::ROOT, Vertex::A);
+                for _ in 0..STRIP_STEPS {
+                    if matches!(sign, CoordSign::Minus) {
+                        let side = current.vertex.canonical_sides()[axis as usize];
+                        graph.ensure_neighbor(current.node, side);
+                    }
+                    let Some(neighbor) = graph.get_chunk_neighbor(current, axis, sign) else {
+                        break;
+                    };
+                    let params_a = ChunkParams::new(&mut graph, current, WorldgenPreset::Hyperbolic);
+                    let params_b = ChunkParams::new(&mut graph, neighbor, WorldgenPreset::Hyperbolic);
+                    assert_face_continuity(&params_a, &params_b, current, neighbor, axis, sign);
+                    current = neighbor;
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn debug_hyper_noise_scale() {
+        let mut graph = Graph::new(CHUNK_SIZE);
+        let chunk = ChunkId::new(NodeId::ROOT, Vertex::A);
+        let params = ChunkParams::new(&mut graph, chunk, WorldgenPreset::Hyperbolic);
+        let center = na::Vector3::repeat(0.5);
+        let step = 1.0 / f32::from(params.dimension);
+        let x_offset = center + na::Vector3::new(step, 0.0, 0.0);
+        let c0 = params.hyperbolic_noise_coords(center);
+        let c1 = params.hyperbolic_noise_coords(x_offset);
+        let axes = params.orientation().horizontal_axes();
+        for axis in axes {
+            let mut axis_offset = center;
+            axis_offset[axis as usize] = (axis_offset[axis as usize] + step).clamp(0.0, 1.0);
+            let delta = params.hyperbolic_noise_coords(axis_offset) - c0;
+            eprintln!("axis {:?} delta {:?} norm {:.6}", axis, delta, delta.norm());
+        }
+        panic!(
+            "center {:?} offset {:?} delta {:?} horizontal_scale {:.3} vertical_scale {:.3}",
+            c0,
+            c1,
+            c1 - c0,
+            params.hyper_block_scale,
+            params.hyper_vertical_block_scale,
+        );
     }
 }

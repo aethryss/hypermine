@@ -78,7 +78,7 @@ fn run_standard_character_step(
     // Update velocity
     if let Some(ground_normal) = ground_normal {
         apply_ground_controls(ctx, &ground_normal, velocity);
-        
+
         // Apply ground friction (ClassiCube-style multiplicative drag)
         let friction_factor = (-ctx.cfg.ground_friction * ctx.dt_seconds).exp();
         let vertical_velocity = *ctx.up * ctx.up.dot(velocity);

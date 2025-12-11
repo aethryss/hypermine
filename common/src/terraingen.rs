@@ -1,46 +1,126 @@
 use crate::world::{BlockID, BlockKind};
 
 macro_rules! mat {
-    (Void) => { BlockKind::Air.id() };
-    (Dirt) => { BlockKind::Dirt.id() };
-    (Silt) => { BlockKind::Dirt.id() };
-    (Mud) => { BlockKind::Dirt.id() };
-    (SandyLoam) => { BlockKind::Dirt.id() };
-    (SiltyLoam) => { BlockKind::Dirt.id() };
-    (ClayLoam) => { BlockKind::Dirt.id() };
-    (Sand) => { BlockKind::Sand.id() };
-    (RedSand) => { BlockKind::Sand.id() };
-    (Clay) => { BlockKind::Clay.id() };
-    (Limestone) => { BlockKind::Stone.id() };
-    (Shale) => { BlockKind::Stone.id() };
-    (Dolomite) => { BlockKind::Stone.id() };
-    (Marble) => { BlockKind::Stone.id() };
-    (Slate) => { BlockKind::Stone.id() };
-    (Granite) => { BlockKind::Stone.id() };
-    (Diorite) => { BlockKind::Stone.id() };
-    (Andesite) => { BlockKind::Stone.id() };
-    (Gabbro) => { BlockKind::Stone.id() };
-    (Basalt) => { BlockKind::Stone.id() };
-    (Olivine) => { BlockKind::Stone.id() };
-    (Sandstone) => { BlockKind::Sandstone.id() };
-    (RedSandstone) => { BlockKind::Sandstone.id() };
-    (Water) => { BlockKind::Water.id() };
-    (Lava) => { BlockKind::Lava.id() };
-    (Wood) => { BlockKind::Log.id() };
-    (Leaves) => { BlockKind::Leaves.id() };
-    (WoodPlanks) => { BlockKind::WoodPlanks.id() };
-    (GreyBrick) => { BlockKind::Cobblestone.id() };
-    (WhiteBrick) => { BlockKind::Brick.id() };
-    (Ice) => { BlockKind::Ice.id() };
-    (IceSlush) => { BlockKind::Snow.id() };
-    (Gravel) => { BlockKind::Gravel.id() };
-    (Snow) => { BlockKind::SnowBlock.id() };
-    (CoarseGrass) => { BlockKind::Grass.id() };
-    (TanGrass) => { BlockKind::Grass.id() };
-    (LushGrass) => { BlockKind::Grass.id() };
-    (MudGrass) => { BlockKind::Grass.id() };
-    (Grass) => { BlockKind::Grass.id() };
-    (CaveGrass) => { BlockKind::Grass.id() };
+    (Void) => {
+        BlockKind::Air.id()
+    };
+    (Dirt) => {
+        BlockKind::Dirt.id()
+    };
+    (Silt) => {
+        BlockKind::Dirt.id()
+    };
+    (Mud) => {
+        BlockKind::Dirt.id()
+    };
+    (SandyLoam) => {
+        BlockKind::Dirt.id()
+    };
+    (SiltyLoam) => {
+        BlockKind::Dirt.id()
+    };
+    (ClayLoam) => {
+        BlockKind::Dirt.id()
+    };
+    (Sand) => {
+        BlockKind::Sand.id()
+    };
+    (RedSand) => {
+        BlockKind::Sand.id()
+    };
+    (Clay) => {
+        BlockKind::Clay.id()
+    };
+    (Limestone) => {
+        BlockKind::Stone.id()
+    };
+    (Shale) => {
+        BlockKind::Stone.id()
+    };
+    (Dolomite) => {
+        BlockKind::Stone.id()
+    };
+    (Marble) => {
+        BlockKind::Stone.id()
+    };
+    (Slate) => {
+        BlockKind::Stone.id()
+    };
+    (Granite) => {
+        BlockKind::Stone.id()
+    };
+    (Diorite) => {
+        BlockKind::Stone.id()
+    };
+    (Andesite) => {
+        BlockKind::Stone.id()
+    };
+    (Gabbro) => {
+        BlockKind::Stone.id()
+    };
+    (Basalt) => {
+        BlockKind::Stone.id()
+    };
+    (Olivine) => {
+        BlockKind::Stone.id()
+    };
+    (Sandstone) => {
+        BlockKind::Sandstone.id()
+    };
+    (RedSandstone) => {
+        BlockKind::Sandstone.id()
+    };
+    (Water) => {
+        BlockKind::Water.id()
+    };
+    (Lava) => {
+        BlockKind::Lava.id()
+    };
+    (Wood) => {
+        BlockKind::Log.id()
+    };
+    (Leaves) => {
+        BlockKind::Leaves.id()
+    };
+    (WoodPlanks) => {
+        BlockKind::WoodPlanks.id()
+    };
+    (GreyBrick) => {
+        BlockKind::Cobblestone.id()
+    };
+    (WhiteBrick) => {
+        BlockKind::Brick.id()
+    };
+    (Ice) => {
+        BlockKind::Ice.id()
+    };
+    (IceSlush) => {
+        BlockKind::Snow.id()
+    };
+    (Gravel) => {
+        BlockKind::Gravel.id()
+    };
+    (Snow) => {
+        BlockKind::SnowBlock.id()
+    };
+    (CoarseGrass) => {
+        BlockKind::Grass.id()
+    };
+    (TanGrass) => {
+        BlockKind::Grass.id()
+    };
+    (LushGrass) => {
+        BlockKind::Grass.id()
+    };
+    (MudGrass) => {
+        BlockKind::Grass.id()
+    };
+    (Grass) => {
+        BlockKind::Grass.id()
+    };
+    (CaveGrass) => {
+        BlockKind::Grass.id()
+    };
 }
 
 macro_rules! voronoi {

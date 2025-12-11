@@ -99,8 +99,8 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let serialized = toml::to_string_pretty(raw)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let serialized =
+            toml::to_string_pretty(raw).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         fs::write(path, serialized)?;
         Ok(())
     }
