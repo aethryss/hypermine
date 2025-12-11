@@ -197,9 +197,9 @@ pub fn reconcile_margin_voxels(
 
     // This can be necessary even if `neighbor_material` hasn't changed because
     // margins are not guaranteed to have exactly the right material unless they
-    // need to be rendered. For instance a margin can sometimes have material
-    // "Dirt" even if the voxel it's based on has material "Slate" because
-    // changing the margin from "Dirt" to "Slate" earlier would have required
+    // need to be rendered. For instance a margin can sometimes store BlockKind::Dirt
+    // even if the voxel it's based on uses BlockKind::Stone because
+    // changing the margin from dirt to stone earlier would have required
     // turning a solid chunk into a dense chunk.
     let Chunk::Populated {
         voxels,
@@ -287,7 +287,7 @@ impl std::ops::Mul<CoordsWithMargins> for ChunkAxisPermutation {
 
 #[cfg(test)]
 mod tests {
-    use crate::{dodeca::Vertex, graph::NodeId, voxel_math::Coords, world::Material};
+    use crate::{dodeca::Vertex, graph::NodeId, voxel_math::Coords, world::BlockKind};
 
     use super::*;
 
@@ -297,12 +297,12 @@ mod tests {
         // coordinates are adjacent to each other.
 
         // `voxels` lives at vertex F
-        let mut voxels = VoxelData::Solid(Material::Void);
-        voxels.data_mut(12)[Coords([11, 2, 10]).to_index(12)] = Material::WoodPlanks;
+    let mut voxels = VoxelData::Solid(BlockKind::Air.id());
+    voxels.data_mut(12)[Coords([11, 2, 10]).to_index(12)] = BlockKind::WoodPlanks.id();
 
         // `neighbor_voxels` lives at vertex J
-        let mut neighbor_voxels = VoxelData::Solid(Material::Void);
-        neighbor_voxels.data_mut(12)[Coords([2, 10, 11]).to_index(12)] = Material::Grass;
+    let mut neighbor_voxels = VoxelData::Solid(BlockKind::Air.id());
+    neighbor_voxels.data_mut(12)[Coords([2, 10, 11]).to_index(12)] = BlockKind::Grass.id();
 
         // Sanity check that voxel adjacencies are as expected. If the test fails here, it's likely that "dodeca.rs" was
         // redesigned, and the test itself will have to be fixed, rather than the code being tested.
@@ -313,11 +313,11 @@ mod tests {
         // test case.
         assert_eq!(
             voxels.get(CoordsWithMargins([12, 3, 11]).to_index(12)),
-            Material::WoodPlanks
+            BlockKind::WoodPlanks.id()
         );
         assert_eq!(
             neighbor_voxels.get(CoordsWithMargins([3, 11, 12]).to_index(12)),
-            Material::Grass
+            BlockKind::Grass.id()
         );
 
         fix_margins(
@@ -331,28 +331,28 @@ mod tests {
         // Actual verification: Check that the margins were set correctly
         assert_eq!(
             voxels.get(CoordsWithMargins([13, 3, 11]).to_index(12)),
-            Material::Grass
+            BlockKind::Grass.id()
         );
         assert_eq!(
             neighbor_voxels.get(CoordsWithMargins([3, 11, 13]).to_index(12)),
-            Material::WoodPlanks
+            BlockKind::WoodPlanks.id()
         );
     }
 
     #[test]
     fn test_initialize_margins() {
-        let mut voxels = VoxelData::Solid(Material::Void);
-        voxels.data_mut(12)[Coords([11, 2, 10]).to_index(12)] = Material::WoodPlanks;
+        let mut voxels = VoxelData::Solid(BlockKind::Air.id());
+        voxels.data_mut(12)[Coords([11, 2, 10]).to_index(12)] = BlockKind::WoodPlanks.id();
         assert_eq!(
             voxels.get(CoordsWithMargins([12, 3, 11]).to_index(12)),
-            Material::WoodPlanks
+            BlockKind::WoodPlanks.id()
         );
 
         initialize_margins(12, &mut voxels);
 
         assert_eq!(
             voxels.get(CoordsWithMargins([13, 3, 11]).to_index(12)),
-            Material::WoodPlanks
+            BlockKind::WoodPlanks.id()
         );
     }
 
@@ -372,7 +372,7 @@ mod tests {
         // Populate relevant chunks
         for chunk in [current_chunk, node_neighbor_chunk, vertex_neighbor_chunk] {
             graph[chunk] = Chunk::Populated {
-                voxels: VoxelData::Solid(Material::Void),
+                voxels: VoxelData::Solid(BlockKind::Air.id()),
                 surface: None,
                 old_surface: None,
             };
@@ -383,8 +383,8 @@ mod tests {
             let Chunk::Populated { voxels, .. } = &mut graph[current_chunk] else {
                 unreachable!()
             };
-            voxels.data_mut(12)[Coords([0, 7, 9]).to_index(12)] = Material::WoodPlanks;
-            voxels.data_mut(12)[Coords([5, 11, 9]).to_index(12)] = Material::Grass;
+            voxels.data_mut(12)[Coords([0, 7, 9]).to_index(12)] = BlockKind::WoodPlanks.id();
+            voxels.data_mut(12)[Coords([5, 11, 9]).to_index(12)] = BlockKind::Grass.id();
         }
 
         // Fill vertex_neighbor chunk with appropriate material
@@ -392,7 +392,7 @@ mod tests {
             let Chunk::Populated { voxels, .. } = &mut graph[vertex_neighbor_chunk] else {
                 unreachable!()
             };
-            voxels.data_mut(12)[Coords([5, 9, 11]).to_index(12)] = Material::Slate;
+            voxels.data_mut(12)[Coords([5, 9, 11]).to_index(12)] = BlockKind::Stone.id();
         }
 
         // Reconcile margins
@@ -419,7 +419,7 @@ mod tests {
         };
         assert_eq!(
             current_voxels.get(CoordsWithMargins([6, 13, 10]).to_index(12)),
-            Material::Slate
+            BlockKind::Stone.id()
         );
 
         // Check the margins of node_neighbor_chunk
@@ -432,7 +432,7 @@ mod tests {
         };
         assert_eq!(
             node_neighbor_voxels.get(CoordsWithMargins([0, 8, 10]).to_index(12)),
-            Material::WoodPlanks
+            BlockKind::WoodPlanks.id()
         );
 
         // Check the margins of vertex_neighbor_chunk
@@ -445,7 +445,7 @@ mod tests {
         };
         assert_eq!(
             vertex_neighbor_voxels.get(CoordsWithMargins([6, 10, 13]).to_index(12)),
-            Material::Grass
+            BlockKind::Grass.id()
         );
     }
 }

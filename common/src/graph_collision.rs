@@ -93,7 +93,7 @@ mod tests {
         proto::Position,
         traversal::{ensure_nearby, nearby_nodes},
         voxel_math::Coords,
-        world::Material,
+    world::BlockKind,
     };
 
     use super::*;
@@ -155,7 +155,7 @@ mod tests {
             for (node, _) in nearby_nodes(&graph, &Position::origin(), graph_radius) {
                 for vertex in dodeca::Vertex::iter() {
                     graph[ChunkId::new(node, vertex)] = Chunk::Populated {
-                        voxels: VoxelData::Solid(TILE_ID_AIR),
+                        voxels: VoxelData::Solid(BlockKind::Air.id()),
                         surface: None,
                         old_surface: None,
                     };
@@ -252,7 +252,7 @@ mod tests {
 
             // Populate the given voxel with dirt.
             voxel_data.data_mut(dimension)[voxel_location.coords.to_index(dimension)] =
-                Material::Dirt;
+                BlockKind::Dirt.id();
         }
 
         fn get_voxel_chunk(graph: &Graph, voxel_location: &VoxelLocation) -> ChunkId {
@@ -428,7 +428,7 @@ mod tests {
         {
             for vertex in dodeca::Vertex::iter() {
                 graph[ChunkId::new(node, vertex)] = Chunk::Populated {
-                    voxels: VoxelData::Solid(TILE_ID_AIR),
+                    voxels: VoxelData::Solid(BlockKind::Air.id()),
                     surface: None,
                     old_surface: None,
                 };

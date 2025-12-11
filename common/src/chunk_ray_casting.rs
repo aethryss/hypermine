@@ -3,7 +3,7 @@ use crate::{
     math::{MVector, PermuteXYZ},
     node::{ChunkLayout, VoxelAABB, VoxelData},
     voxel_math::{CoordAxis, CoordSign, Coords},
-    // world::Material, // removed
+    world::BlockKind,
 };
 
 pub struct ChunkCastHit {
@@ -132,12 +132,12 @@ fn voxel_is_solid(voxel_data: &VoxelData, layout: &ChunkLayout, coords: [u8; 3])
     debug_assert!(coords[0] < layout.dimension());
     debug_assert!(coords[1] < layout.dimension());
     debug_assert!(coords[2] < layout.dimension());
-    voxel_data.get(Coords(coords).to_index(layout.dimension())) != 0 // 0 is Air
+    voxel_data.get(Coords(coords).to_index(layout.dimension())) != BlockKind::Air.id()
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::node::VoxelData;
+    use crate::{node::VoxelData, world::{BlockID, BlockKind}};
 
     use super::*;
 
@@ -153,17 +153,17 @@ mod tests {
 
             let mut ctx = TestRayCastContext {
                 layout: ChunkLayout::new(dimension),
-                voxel_data: VoxelData::Solid(0), // 0 is Air
+                voxel_data: VoxelData::Solid(BlockKind::Air.id()),
             };
 
             // Populate voxels. Consists of a single voxel with voxel coordinates (1, 1, 1). The cube corresponding
             // to this voxel has grid coordinates from (1, 1, 1) to (2, 2, 2)
-            ctx.set_voxel([1, 1, 1], Material::Dirt);
+            ctx.set_voxel([1, 1, 1], BlockKind::Dirt.id());
 
             ctx
         }
 
-        fn set_voxel(&mut self, coords: [u8; 3], material: Material) {
+        fn set_voxel(&mut self, coords: [u8; 3], material: BlockID) {
             debug_assert!(coords[0] < self.layout.dimension());
             debug_assert!(coords[1] < self.layout.dimension());
             debug_assert!(coords[2] < self.layout.dimension());

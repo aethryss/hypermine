@@ -32,6 +32,7 @@ pub mod traversal;
 pub mod voxel_math;
 pub mod world;
 pub mod worldgen;
+pub mod terraingen;
 
 pub use chunks::Chunks;
 pub use graph_entities::GraphEntities;
