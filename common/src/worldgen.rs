@@ -23,6 +23,7 @@
 use rand::{Rng, SeedableRng, distr::Uniform};
 use rand_distr::Normal;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 use crate::{
     dodeca::{Side, Vertex},
@@ -335,8 +336,9 @@ impl ChunkParams {
             hyper_vertical_block_scale: 1.0,
         };
 
-        params.hyper_block_scale = params.estimate_horizontal_block_scale();
-        params.hyper_vertical_block_scale = params.estimate_vertical_block_scale();
+        let (block_scale, vertical_block_scale) = params.shared_block_scales();
+        params.hyper_block_scale = block_scale;
+        params.hyper_vertical_block_scale = vertical_block_scale;
         params
     }
 
@@ -429,6 +431,15 @@ impl ChunkParams {
         } else {
             1.0 / dist
         }
+    }
+
+    fn shared_block_scales(&self) -> (f64, f64) {
+        static BLOCK_SCALES: OnceLock<(f64, f64)> = OnceLock::new();
+        *BLOCK_SCALES.get_or_init(|| {
+            let horizontal = self.estimate_horizontal_block_scale();
+            let vertical = self.estimate_vertical_block_scale();
+            (horizontal, vertical)
+        })
     }
 
     fn vertical_density_scale(&self) -> f32 {
@@ -1727,6 +1738,16 @@ mod test {
         base[axis as usize] = if matches!(sign, CoordSign::Plus) { 1.0 } else { 0.0 };
         let [axis_u, axis_v] = axis.other_axes();
         let noise = HyperbolicNoise::new(0x5eed_5eed);
+        let block_eps = EPS * params_a.hyper_block_scale.max(params_b.hyper_block_scale);
+        let block3_eps = EPS
+            * params_a
+                .hyper_block_scale
+                .max(params_b.hyper_block_scale)
+                .max(
+                    params_a
+                        .hyper_vertical_block_scale
+                        .max(params_b.hyper_vertical_block_scale),
+                );
 
         for i in 0..=GRID_STEPS {
             for j in 0..=GRID_STEPS {
@@ -1761,15 +1782,18 @@ mod test {
 
                 let block2_a = params_a.hyperbolic_block_coords(local_a);
                 let block2_b = params_b.hyperbolic_block_coords(local_b);
+                let block2_diff = (block2_a - block2_b).norm();
                 assert!(
-                    (block2_a - block2_b).norm() < 1e-5,
-                    "block coords diverged across face"
+                    block2_diff < block_eps,
+                    "block coords diverged across face: diff={block2_diff}, eps={block_eps}"
                 );
                 let block3_a = params_a.hyperbolic_block_coords_3d(local_a);
                 let block3_b = params_b.hyperbolic_block_coords_3d(local_b);
+                let block3_diff = (block3_a - block3_b).norm();
+                let hyper3_diff = (hyper3_a - hyper3_b).norm();
                 assert!(
-                    (block3_a - block3_b).norm() < 1e-5,
-                    "block 3d coords diverged across face"
+                    block3_diff < block3_eps,
+                    "block 3d coords diverged across face: block_diff={block3_diff}, hyper_diff={hyper3_diff}, eps={block3_eps}"
                 );
 
                 let sample2_a = noise.sample2(hyper2_a);
@@ -1797,7 +1821,6 @@ mod test {
     }
 
     #[test]
-    #[ignore = "fails until hyperbolic noise continuity across chunk faces is fixed"]
     fn hyperbolic_noise_face_stress_test() {
         const STRIP_STEPS: usize = 5;
         let mut graph = Graph::new(CHUNK_SIZE);

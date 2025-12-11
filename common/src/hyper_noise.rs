@@ -100,8 +100,8 @@ fn perlin2(seed: u64, coords: Vector2<f64>) -> f64 {
 
     let ix0 = cell.x as i64;
     let iy0 = cell.y as i64;
-    let ix1 = ix0 + 1;
-    let iy1 = iy0 + 1;
+    let ix1 = ix0.wrapping_add(1);
+    let iy1 = iy0.wrapping_add(1);
 
     let grad00 = grad2(seed, ix0, iy0);
     let grad10 = grad2(seed, ix1, iy0);
@@ -129,9 +129,9 @@ fn perlin3(seed: u64, coords: Vector3<f64>) -> f64 {
     let ix0 = cell.x as i64;
     let iy0 = cell.y as i64;
     let iz0 = cell.z as i64;
-    let ix1 = ix0 + 1;
-    let iy1 = iy0 + 1;
-    let iz1 = iz0 + 1;
+    let ix1 = ix0.wrapping_add(1);
+    let iy1 = iy0.wrapping_add(1);
+    let iz1 = iz0.wrapping_add(1);
 
     let grad000 = grad3(seed, ix0, iy0, iz0);
     let grad100 = grad3(seed, ix1, iy0, iz0);
