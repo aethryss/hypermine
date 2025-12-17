@@ -69,7 +69,7 @@ pub async fn run() -> Result<()> {
 
     let save = cfg.save.unwrap_or_else(|| "hyperbolicraft.save".into());
     info!("using save file {}", save.display());
-    let save = Save::open(&save, sim_cfg.chunk_size)?;
+    let save = Save::open(&save, sim_cfg.chunk_size, sim_cfg.world_seed)?;
 
     let server = server::Server::new(
         Some(server::NetParams {

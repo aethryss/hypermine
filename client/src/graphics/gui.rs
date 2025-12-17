@@ -1,4 +1,12 @@
-use std::{net::SocketAddr, str::FromStr, sync::Arc};
+use std::{
+    fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+};
+
+use rand::random;
 
 use yakui::{
     Alignment, Color, align, button, colored_box, colored_box_container, column, label, pad, row,
@@ -7,6 +15,7 @@ use yakui::{
 
 use common::worldgen::sample_enviro_at;
 use common::{SimConfig, worldgen::WorldgenPreset};
+use save::Save;
 
 use crate::{Sim, config::RawConfig};
 
@@ -32,10 +41,10 @@ pub enum GuiAction {
 }
 
 impl GuiState {
-    pub fn new(raw_config: RawConfig) -> Self {
+    pub fn new(raw_config: RawConfig, save_dir: PathBuf) -> Self {
         GuiState {
             show_gui: true,
-            config_panel: ConfigPanel::new(raw_config),
+            config_panel: ConfigPanel::new(raw_config, save_dir),
         }
     }
 
@@ -88,10 +97,6 @@ impl GuiState {
         self.show_gui = true;
     }
 
-    pub fn raw_config(&self) -> &RawConfig {
-        self.config_panel.raw_config()
-    }
-
     fn render_material_panel(&self, sim: &Sim) {
         if !self.show_gui {
             return;
@@ -126,7 +131,9 @@ impl GuiState {
         let view_pos = sim.view();
 
         // `sample_enviro_at` expects the graph to have the node populated; if not, skip.
-        let sample = match std::panic::catch_unwind(|| sample_enviro_at(&sim.graph, &view_pos)) {
+        let sample = match std::panic::catch_unwind(|| {
+            sample_enviro_at(&sim.graph, &view_pos, sim.cfg.world_seed)
+        }) {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -169,6 +176,9 @@ struct ConfigPanel {
     form: ConfigForm,
     message: Option<PanelMessage>,
     raw: RawConfig,
+    save_dir: PathBuf,
+    available_saves: Vec<SaveSummary>,
+    selected_save: Option<usize>,
 }
 
 struct ConfigForm {
@@ -176,6 +186,8 @@ struct ConfigForm {
     chunk_parallelism: String,
     server: String,
     worldgen: WorldgenDescriptor,
+    save_name: String,
+    seed: String,
     start_in_freecam: bool,
 }
 
@@ -190,8 +202,14 @@ enum PanelMessage {
     Error(String),
 }
 
+#[derive(Clone)]
+struct SaveSummary {
+    name: String,
+    seed: Option<u64>,
+}
+
 impl ConfigPanel {
-    fn new(raw: RawConfig) -> Self {
+    fn new(raw: RawConfig, save_dir: PathBuf) -> Self {
         let name = raw
             .name
             .clone()
@@ -202,19 +220,37 @@ impl ConfigPanel {
             WorldgenPreset::Hyperbolic => WorldgenDescriptor::Hyperbolic,
             WorldgenPreset::Flat => WorldgenDescriptor::Flat,
         };
+        let save_name = raw
+            .save
+            .clone()
+            .unwrap_or_else(|| "default.save".into())
+            .to_string_lossy()
+            .to_string();
+        let seed = raw
+            .local_simulation
+            .world_seed
+            .map(|s| s.to_string())
+            .unwrap_or_default();
 
-        ConfigPanel {
+        let mut panel = ConfigPanel {
             awaiting_start: true,
             form: ConfigForm {
                 name: name.to_string(),
                 chunk_parallelism,
                 server,
                 worldgen,
+                save_name,
+                seed,
                 start_in_freecam: true,
             },
             message: None,
             raw,
-        }
+            save_dir,
+            available_saves: Vec::new(),
+            selected_save: None,
+        };
+        panel.refresh_save_list();
+        panel
     }
 
     fn should_render(&self, show_gui: bool) -> bool {
@@ -235,6 +271,29 @@ impl ConfigPanel {
 
                         pad(Pad::all(6.0), || {
                             self.draw_worldgen_row();
+                        });
+
+                        pad(Pad::all(6.0), || {
+                            self.draw_world_list();
+                        });
+
+                        pad(Pad::all(6.0), || {
+                            self.draw_save_name_field();
+                        });
+
+                        pad(Pad::all(6.0), || {
+                            column(|| {
+                                label("World seed (leave blank for random)");
+                                row(|| {
+                                    let response = textbox(self.form.seed.clone());
+                                    if let Some(text) = response.text.clone() {
+                                        self.form.seed = text;
+                                    }
+                                    if button("Randomize").clicked {
+                                        self.form.seed = random::<u64>().to_string();
+                                    }
+                                });
+                            });
                         });
 
                         pad(Pad::all(6.0), || {
@@ -313,6 +372,53 @@ impl ConfigPanel {
         });
     }
 
+    fn draw_save_name_field(&mut self) {
+        column(|| {
+            label("World save name".to_string());
+            let response = textbox(self.form.save_name.clone());
+            if let Some(text) = response.text.clone() {
+                if text != self.form.save_name {
+                    self.form.save_name = text;
+                    self.sync_selection_with_form();
+                }
+            }
+        });
+    }
+
+    fn draw_world_list(&mut self) {
+        column(|| {
+            label("Worlds".to_string());
+            if self.available_saves.is_empty() {
+                label("No worlds found in save directory".to_string());
+            } else {
+                for idx in 0..self.available_saves.len() {
+                    let save_name = self.available_saves[idx].name.clone();
+                    let save_seed = self.available_saves[idx].seed;
+                    let selected = self.selected_save == Some(idx);
+                    row(|| {
+                        let button_label = if selected {
+                            format!("[x] {}", save_name)
+                        } else {
+                            format!("[ ] {}", save_name)
+                        };
+                        if button(button_label).clicked {
+                            self.select_save(idx);
+                        }
+                        let seed_label = match save_seed {
+                            Some(seed) => format!("Seed: {}", seed),
+                            None => "Seed: <unknown>".to_string(),
+                        };
+                        label(seed_label);
+                    });
+                }
+            }
+
+            if button("Refresh world list").clicked {
+                self.refresh_save_list();
+            }
+        });
+    }
+
     fn draw_worldgen_row(&mut self) {
         column(|| {
             label("World generation preset");
@@ -361,6 +467,66 @@ impl ConfigPanel {
         });
     }
 
+    fn refresh_save_list(&mut self) {
+        let mut saves = Vec::new();
+        let chunk_size_hint = self.chunk_size_hint();
+        if let Ok(entries) = fs::read_dir(&self.save_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let seed = self.read_save_seed(&path, chunk_size_hint);
+                saves.push(SaveSummary { name, seed });
+            }
+        }
+        saves.sort_by(|a, b| a.name.cmp(&b.name));
+        self.available_saves = saves;
+        self.sync_selection_with_form();
+    }
+
+    fn select_save(&mut self, idx: usize) {
+        if let Some(save) = self.available_saves.get(idx) {
+            self.selected_save = Some(idx);
+            self.form.save_name = save.name.clone();
+            self.form.seed = save.seed.map(|s| s.to_string()).unwrap_or_default();
+        }
+    }
+
+    fn sync_selection_with_form(&mut self) {
+        let trimmed = self.form.save_name.trim();
+        if trimmed.is_empty() {
+            self.selected_save = None;
+            return;
+        }
+        self.selected_save = self
+            .available_saves
+            .iter()
+            .position(|save| save.name == trimmed);
+        if let Some(idx) = self.selected_save {
+            if let Some(save) = self.available_saves.get(idx)
+                && self.form.seed.trim().is_empty()
+                && let Some(seed) = save.seed
+            {
+                self.form.seed = seed.to_string();
+            }
+        }
+    }
+
+    fn read_save_seed(&self, path: &Path, chunk_size_hint: u8) -> Option<u64> {
+        Save::open(path, chunk_size_hint, 0)
+            .ok()
+            .and_then(|save| match save.meta().seed {
+                0 => None,
+                seed => Some(seed),
+            })
+    }
+
+    fn chunk_size_hint(&self) -> u8 {
+        self.raw.local_simulation.chunk_size.unwrap_or(16)
+    }
+
     fn build_session_options(&mut self) -> Result<GuiAction, String> {
         let name = self.form.name.trim().to_string();
         if name.is_empty() {
@@ -377,6 +543,21 @@ impl ConfigPanel {
             return Err("Chunk load parallelism must be greater than zero".into());
         }
 
+        let save_name = self.form.save_name.trim();
+        if save_name.is_empty() {
+            return Err("World save name cannot be empty".into());
+        }
+
+        let seed = if self.form.seed.trim().is_empty() {
+            random::<u64>()
+        } else {
+            self.form
+                .seed
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| "World seed must be a valid unsigned integer".to_string())?
+        };
+
         let server = self.parse_server()?;
 
         let mut raw = self.raw.clone();
@@ -387,6 +568,8 @@ impl ConfigPanel {
             WorldgenDescriptor::Hyperbolic => WorldgenPreset::Hyperbolic,
             WorldgenDescriptor::Flat => WorldgenPreset::Flat,
         };
+        raw.local_simulation.world_seed = Some(seed);
+        raw.save = Some(save_name.into());
 
         let sim_config = SimConfig::from_raw(&raw.local_simulation);
         let session = SessionOptions {
@@ -422,9 +605,5 @@ impl ConfigPanel {
 
     fn set_message(&mut self, message: PanelMessage) {
         self.message = Some(message);
-    }
-
-    fn raw_config(&self) -> &RawConfig {
-        &self.raw
     }
 }

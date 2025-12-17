@@ -44,6 +44,7 @@ pub struct Server {
 impl Server {
     pub fn new(net: Option<NetParams>, mut cfg: SimConfig, save: Save) -> Result<Self> {
         cfg.chunk_size = save.meta().chunk_size as u8;
+        cfg.world_seed = save.meta().seed;
         let endpoint = net
             .map(|net| {
                 let server_config =

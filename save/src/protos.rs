@@ -4,6 +4,9 @@ pub struct Meta {
     /// Number of voxels along the edge of a chunk
     #[prost(uint32, tag = "1")]
     pub chunk_size: u32,
+    /// World seed for deterministic generation
+    #[prost(uint64, tag = "2")]
+    pub seed: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Character {

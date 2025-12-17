@@ -92,7 +92,11 @@ impl Sim {
         graph.ensure_node_state(NodeId::ROOT);
         Self {
             graph,
-            worldgen_driver: WorldgenDriver::new(chunk_load_parallelism, worldgen_preset),
+            worldgen_driver: WorldgenDriver::new(
+                chunk_load_parallelism,
+                worldgen_preset,
+                cfg.world_seed,
+            ),
             graph_entities: GraphEntities::new(),
             entity_ids: FxHashMap::default(),
             world: hecs::World::new(),

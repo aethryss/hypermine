@@ -5,17 +5,17 @@ use save::Save;
 #[test]
 fn persist_meta() {
     let file = tempfile::NamedTempFile::new().unwrap();
-    let save = Save::open(file.path(), 12).unwrap();
+    let save = Save::open(file.path(), 12, 0).unwrap();
     assert_eq!(save.meta().chunk_size, 12);
     drop(save);
-    let save = Save::open(file.path(), 8).unwrap();
+    let save = Save::open(file.path(), 8, 0).unwrap();
     assert_eq!(save.meta().chunk_size, 12);
 }
 
 #[test]
 fn persist_node() {
     let file = tempfile::NamedTempFile::new().unwrap();
-    let save = Save::open(file.path(), 12).unwrap();
+    let save = Save::open(file.path(), 12, 0).unwrap();
     let node = save::VoxelNode {
         chunks: vec![save::Chunk {
             vertex: 0,
@@ -38,7 +38,7 @@ fn persist_node() {
 #[test]
 fn persist_character() {
     let file = tempfile::NamedTempFile::new().unwrap();
-    let save = Save::open(file.path(), 12).unwrap();
+    let save = Save::open(file.path(), 12, 0).unwrap();
     let mut writer_guard = save.write().unwrap();
     let mut writer = writer_guard.get().unwrap();
     let mut rng = SmallRng::from_os_rng();
@@ -52,7 +52,7 @@ fn persist_character() {
     writer_guard.commit().unwrap();
     drop(save);
 
-    let save = Save::open(file.path(), 12).unwrap();
+    let save = Save::open(file.path(), 12, 0).unwrap();
     assert_eq!(
         ch,
         save.read().unwrap().get_character("asdf").unwrap().unwrap()

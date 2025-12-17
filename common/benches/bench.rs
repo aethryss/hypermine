@@ -45,7 +45,12 @@ fn build_graph(c: &mut Criterion) {
             for (node, _) in all_nodes {
                 for vertex in Vertex::iter() {
                     let chunk = ChunkId::new(node, vertex);
-                    let params = ChunkParams::new(&mut graph, chunk, WorldgenPreset::Hyperbolic);
+                    let params = ChunkParams::new(
+                        &mut graph,
+                        chunk,
+                        WorldgenPreset::Hyperbolic,
+                        0x5eed_5eed,
+                    );
                     graph[chunk] = Chunk::Populated {
                         voxels: params.generate_voxels(),
                         surface: None,

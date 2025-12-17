@@ -587,6 +587,12 @@ impl<N: RealField + Copy> MIsometry<N> {
         self.0.row(i)
     }
 
+    /// Returns a reference to the underlying 4x4 matrix.
+    #[inline]
+    pub fn matrix(&self) -> &na::Matrix4<N> {
+        &self.0
+    }
+
     /// Creates an identity matrix.
     #[inline]
     pub fn identity() -> Self {

@@ -5,6 +5,8 @@ package protos;
 message Meta {
     // Number of voxels along the edge of a chunk
     uint32 chunk_size = 1;
+    // World seed for deterministic generation
+    uint64 seed = 2;
 }
 
 message Character {

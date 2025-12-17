@@ -14,9 +14,9 @@ pub struct Save {
 }
 
 impl Save {
-    pub fn open(path: &Path, default_chunk_size: u8) -> Result<Self, OpenError> {
+    pub fn open(path: &Path, default_chunk_size: u8, default_seed: u64) -> Result<Self, OpenError> {
         let db = Database::create(path).map_err(redb::Error::from)?;
-        let meta = {
+        let (meta, needs_writeback) = {
             let tx = db.begin_read().map_err(redb::Error::from)?;
             match tx.open_table(META_TABLE) {
                 Ok(meta) => {
@@ -27,19 +27,30 @@ impl Save {
                     let mut buffer = Vec::new();
                     decompress(&mut dctx, value.value(), &mut buffer)
                         .map_err(OpenError::DecompressionFailed)?;
-                    Meta::decode(&*buffer)?
+                    let mut meta = Meta::decode(&*buffer)?;
+                    let mut needs_writeback = false;
+                    // Backward compatibility: older saves may not have a seed set.
+                    if meta.seed == 0 {
+                        meta.seed = default_seed;
+                        needs_writeback = default_seed != 0;
+                    }
+                    (meta, needs_writeback)
                 }
                 Err(redb::TableError::TableDoesNotExist(_)) => {
                     // Must be an empty save file. Initialize the meta record and create the other tables.
                     let defaults = Meta {
                         chunk_size: default_chunk_size.into(),
+                        seed: default_seed,
                     };
                     init_meta_table(&db, &defaults)?;
-                    defaults
+                    (defaults, false)
                 }
                 Err(e) => return Err(OpenError::Db(DbError(Box::new(e.into())))),
             }
         };
+        if needs_writeback {
+            write_meta(&db, &meta)?;
+        }
         Ok(Self { meta, db })
     }
 
@@ -78,6 +89,19 @@ fn init_meta_table(db: &Database, value: &Meta) -> Result<(), DbError> {
     tx.open_table(VOXEL_NODE_TABLE)?;
     tx.open_table(ENTITY_NODE_TABLE)?;
     tx.open_table(CHARACTERS_BY_NAME_TABLE)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn write_meta(db: &Database, value: &Meta) -> Result<(), DbError> {
+    let tx = db.begin_write().map_err(redb::Error::from)?;
+    let mut meta = tx.open_table(META_TABLE)?;
+    let mut cctx = cctx();
+    let mut plain = Vec::new();
+    let mut compressed = Vec::new();
+    prepare(&mut cctx, &mut plain, &mut compressed, value);
+    meta.insert(&[][..], &*compressed)?;
+    drop(meta);
     tx.commit()?;
     Ok(())
 }

@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use rand::random;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{dodeca, math::MVector, worldgen::WorldgenPreset};
@@ -21,6 +23,8 @@ pub struct SimConfigRaw {
     pub gameplay_enabled: Option<bool>,
     /// Number of voxels along the edge of a chunk
     pub chunk_size: Option<u8>,
+    /// Optional world seed for deterministic world generation
+    pub world_seed: Option<u64>,
     #[serde(default)]
     pub worldgen: WorldgenPreset,
     /// Approximate length of the edge of a voxel in meters
@@ -55,6 +59,8 @@ pub struct SimConfig {
     pub chunk_size: u8,
     /// World generation preset controlling how new chunks are populated
     pub worldgen: WorldgenPreset,
+    /// World seed used for deterministic generation
+    pub world_seed: u64,
     /// Static configuration information relevant to character physics
     pub character: CharacterConfig,
     /// Scaling factor converting meters to absolute units
@@ -64,6 +70,7 @@ pub struct SimConfig {
 impl SimConfig {
     pub fn from_raw(x: &SimConfigRaw) -> Self {
         let chunk_size = x.chunk_size.unwrap_or(16);
+        let world_seed = x.world_seed.unwrap_or_else(random);
         let voxel_size = x.voxel_size.unwrap_or(1.0);
         let meters_to_absolute = meters_to_absolute(chunk_size, voxel_size);
         SimConfig {
@@ -76,6 +83,7 @@ impl SimConfig {
             gameplay_enabled: x.gameplay_enabled.unwrap_or(false),
             chunk_size,
             worldgen: x.worldgen,
+            world_seed,
             character: CharacterConfig::from_raw(&x.character, meters_to_absolute),
             meters_to_absolute,
         }

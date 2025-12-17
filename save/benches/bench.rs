@@ -20,7 +20,7 @@ fn save(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let file = tempfile::NamedTempFile::new().unwrap();
-                    let save = Save::open(file.path(), 12).unwrap();
+                    let save = Save::open(file.path(), 12, 0).unwrap();
                     let node_ids = (&mut rng)
                         .sample_iter(rand::distr::StandardUniform)
                         .take(count as usize)
@@ -49,7 +49,7 @@ fn save(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let file = tempfile::NamedTempFile::new().unwrap();
-                    let save = Save::open(file.path(), 12).unwrap();
+                    let save = Save::open(file.path(), 12, 0).unwrap();
                     let node_ids = (&mut rng)
                         .sample_iter(rand::distr::StandardUniform)
                         .take(count as usize)

@@ -94,7 +94,7 @@ impl Window {
         };
         let surface_fn = khr::surface::Instance::new(&core.entry, &core.instance);
         let config_path = Config::config_path(&dirs);
-        let gui_state = GuiState::new(raw_config.clone());
+        let gui_state = GuiState::new(raw_config.clone(), dirs.data_local_dir().to_path_buf());
         let yak = yakui::Yakui::new();
         let yak_winit = yakui_winit::YakuiWinit::new(&early.window);
 
@@ -343,7 +343,10 @@ impl Window {
                 self.net = None;
                 self.sim = None;
                 self.active_session = None;
-                self.gui_state = GuiState::new(self.raw_config.clone());
+                self.gui_state = GuiState::new(
+                    self.raw_config.clone(),
+                    self.dirs.data_local_dir().to_path_buf(),
+                );
                 self.gui_state.set_error(format!("Connection lost: {}", e));
             }
             Message::Hello(msg) => {
@@ -534,8 +537,12 @@ impl Window {
             std::fs::create_dir_all(parent)
                 .map_err(|err| format!("Failed to create save directory: {}", err))?;
         }
-        let save = Save::open(&save_path, session.sim_config.chunk_size)
-            .map_err(|err| format!("Couldn't open save: {}", err))?;
+        let save = Save::open(
+            &save_path,
+            session.sim_config.chunk_size,
+            session.sim_config.world_seed,
+        )
+        .map_err(|err| format!("Couldn't open save: {}", err))?;
 
         info!("using save file {}", save_path.display());
 

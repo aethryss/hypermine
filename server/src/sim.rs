@@ -508,7 +508,12 @@ impl Sim {
                         self.modified_chunks.insert(chunk);
                         self.graph.populate_chunk(chunk, voxel_data);
                     } else {
-                        let params = ChunkParams::new(&mut self.graph, chunk, self.cfg.worldgen);
+                        let params = ChunkParams::new(
+                            &mut self.graph,
+                            chunk,
+                            self.cfg.worldgen,
+                            self.cfg.world_seed,
+                        );
                         self.graph.populate_chunk(chunk, params.generate_voxels());
                     }
                 }

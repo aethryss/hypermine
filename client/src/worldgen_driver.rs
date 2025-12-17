@@ -20,15 +20,17 @@ pub struct WorldgenDriver {
     /// Voxel data that has been fetched from the server but not yet introduced to the graph
     preloaded_voxel_data: FxHashMap<ChunkId, VoxelData>,
     preset: WorldgenPreset,
+    seed: u64,
 }
 
 impl WorldgenDriver {
-    pub fn new(chunk_load_parallelism: usize, preset: WorldgenPreset) -> Self {
+    pub fn new(chunk_load_parallelism: usize, preset: WorldgenPreset, seed: u64) -> Self {
         Self {
             work_queue: WorkQueue::new(chunk_load_parallelism),
             preloaded_block_updates: FxHashMap::default(),
             preloaded_voxel_data: FxHashMap::default(),
             preset,
+            seed,
         }
     }
 
@@ -68,7 +70,8 @@ impl WorldgenDriver {
                 }
 
                 // Generate voxel data
-                let params = common::worldgen::ChunkParams::new(graph, chunk_id, self.preset);
+                let params =
+                    common::worldgen::ChunkParams::new(graph, chunk_id, self.preset, self.seed);
                 if let Some(voxel_data) = self.preloaded_voxel_data.remove(&chunk_id) {
                     self.add_chunk_to_graph(graph, chunk_id, voxel_data);
                 } else if self.work_queue.load(ChunkDesc { node, params }) {
