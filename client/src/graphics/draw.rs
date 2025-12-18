@@ -6,7 +6,7 @@ use common::traversal;
 use lahar::Staged;
 use metrics::histogram;
 
-use super::{Base, Fog, Frustum, GltfScene, Meshes, Voxels, fog, voxels};
+use super::{Base, Fog, Frustum, GltfScene, Meshes, TransparencyMap, Voxels, fog, voxels};
 use crate::{Asset, Config, Loader, Sim};
 use common::SimConfig;
 use common::proto::{Character, Position};
@@ -231,12 +231,22 @@ impl Draw {
 
     /// Called with server-defined world parameters once they're known
     pub fn configure(&mut self, cfg: &SimConfig) {
+        // Load transparency map synchronously - we need it before creating voxel buffers
+        let transparency_map = TransparencyMap::from_atlas(std::path::Path::new(
+            "assets/materials/terrain.png",
+        ))
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to load transparency map: {}, using default", e);
+            TransparencyMap::default()
+        });
+
         let voxels = Voxels::new(
             &self.gfx,
             self.cfg.clone(),
             &mut self.loader,
             u32::from(cfg.chunk_size),
             PIPELINE_DEPTH,
+            &transparency_map,
         );
         for state in &mut self.states {
             state.voxels = Some(voxels::Frame::new(&self.gfx, &voxels));
@@ -439,7 +449,8 @@ impl Draw {
                     .clear_values(&[
                         vk::ClearValue {
                             color: vk::ClearColorValue {
-                                float32: [0.0, 0.0, 0.0, 0.0],
+                                // Clear to sky color so translucent blocks blend correctly
+                                float32: [0.5, 0.65, 0.9, 1.0],
                             },
                         },
                         vk::ClearValue {

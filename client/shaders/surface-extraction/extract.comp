@@ -16,23 +16,62 @@ layout(set = 0, binding = 1, std430) restrict readonly uniform TextureIndices {
     uint texture_index[256];  // Maps TileID (0-255) to texture index (0-255)
 };
 
+// Transparency class for each block ID (0=opaque, 1=cutout, 2=translucent)
+// Index is block_id, value is transparency class
+layout(set = 0, binding = 2, std430) restrict readonly uniform TransparencyClasses {
+    uint transparency_class[256];
+};
+
+// Get transparency class for a block ID (0 = void/air is treated specially)
+uint get_transparency_class(uint block_id) {
+    if (block_id == 0) return TRANSPARENCY_OPAQUE; // Air has no transparency class
+    return transparency_class[block_id];
+}
+
 layout(set = 1, binding = 0) readonly restrict buffer Voxels {
     uint voxel_pair[];
 };
 
+// Face counts for each transparency class
 layout(set = 1, binding = 1) restrict buffer State {
-    uint face_count;
+    uint opaque_face_count;
+    uint cutout_face_count;
+    uint translucent_face_count;
 };
 
-layout(set = 1, binding = 2) writeonly restrict buffer Indirect {
-    uint vertex_count;
-    uint instance_count;
-    uint first_vertex;
-    uint first_instance;
+// Indirect draw commands for each transparency class
+layout(set = 1, binding = 2) writeonly restrict buffer IndirectOpaque {
+    uint opaque_vertex_count;
+    uint opaque_instance_count;
+    uint opaque_first_vertex;
+    uint opaque_first_instance;
 };
 
-layout(set = 1, binding = 3) writeonly restrict buffer Surfaces {
-    Surface surfaces[];
+layout(set = 1, binding = 3) writeonly restrict buffer IndirectCutout {
+    uint cutout_vertex_count;
+    uint cutout_instance_count;
+    uint cutout_first_vertex;
+    uint cutout_first_instance;
+};
+
+layout(set = 1, binding = 4) writeonly restrict buffer IndirectTranslucent {
+    uint translucent_vertex_count;
+    uint translucent_instance_count;
+    uint translucent_first_vertex;
+    uint translucent_first_instance;
+};
+
+// Surface output buffers for each transparency class
+layout(set = 1, binding = 5) writeonly restrict buffer SurfacesOpaque {
+    Surface surfaces_opaque[];
+};
+
+layout(set = 1, binding = 6) writeonly restrict buffer SurfacesCutout {
+    Surface surfaces_cutout[];
+};
+
+layout(set = 1, binding = 7) writeonly restrict buffer SurfacesTranslucent {
+    Surface surfaces_translucent[];
 };
 
 layout(push_constant) uniform Uniforms {
@@ -60,6 +99,16 @@ struct Face {
     bool inward;
     // contents of the solid voxel incident to the face, which may be a neighbor
     uint material;
+    // transparency class of the face (0=opaque, 1=cutout, 2=translucent)
+    uint trans_class;
+};
+
+// Result of examining a boundary - may produce 0, 1, or 2 faces
+struct FaceResult {
+    bool has_face1;
+    bool has_face2;
+    Face face1;
+    Face face2;
 };
 
 ivec3 neighbor_offset(uint axis) {
@@ -68,24 +117,75 @@ ivec3 neighbor_offset(uint axis) {
     return off;
 }
 
-bool find_face(out Face info) {
+FaceResult find_faces() {
+    FaceResult result;
+    result.has_face1 = false;
+    result.has_face2 = false;
+    
     // We only look at negative-facing faces of the current voxel, and iterate one past the end on
     // each dimension to enclose it fully.
-    info.voxel = ivec3(gl_GlobalInvocationID.x / 3, gl_GlobalInvocationID.yz);
-    info.axis = gl_GlobalInvocationID.x % 3;
-    ivec3 neighbor = info.voxel + neighbor_offset(info.axis);
+    ivec3 voxel = ivec3(gl_GlobalInvocationID.x / 3, gl_GlobalInvocationID.yz);
+    uint axis = gl_GlobalInvocationID.x % 3;
+    ivec3 neighbor = voxel + neighbor_offset(axis);
+    
     // Don't generate faces between out-of-bounds voxels
-    if (any(greaterThanEqual(info.voxel, ivec3(dimension))) && any(greaterThanEqual(neighbor, ivec3(dimension)))) return false;
+    if (any(greaterThanEqual(voxel, ivec3(dimension))) && any(greaterThanEqual(neighbor, ivec3(dimension)))) return result;
+    
     uint neighbor_mat = get_voxel(neighbor);
-    uint self_mat = get_voxel(info.voxel);
-    // Flip face around if the neighbor is the solid one
-    info.inward = self_mat == 0;
-    // Use texture_index from the non-air voxel
-    info.material = (self_mat != 0) ? texture_index[self_mat] : texture_index[neighbor_mat];
+    uint self_mat = get_voxel(voxel);
+    
     // If self or neighbor is a void margin, then no surface should be generated, as any surface
     // that would be rendered is the responsibility of the adjacent chunk.
-    if ((self_mat == 0 && info.voxel[info.axis] == dimension) || (neighbor_mat == 0 && neighbor[info.axis] == -1)) return false;
-    return (neighbor_mat == 0) != (self_mat == 0);
+    if ((self_mat == 0 && voxel[axis] == dimension) || (neighbor_mat == 0 && neighbor[axis] == -1)) return result;
+    
+    // Both void = no face
+    if (self_mat == 0 && neighbor_mat == 0) return result;
+    
+    // Both solid with same material = no face (same block type never needs internal faces)
+    if (self_mat == neighbor_mat) return result;
+    
+    // Both solid with different materials = check transparency classes
+    if (self_mat != 0 && neighbor_mat != 0) {
+        uint self_class = get_transparency_class(self_mat);
+        uint neighbor_class = get_transparency_class(neighbor_mat);
+        
+        // Same transparency class: no face between them (standard culling within same mesh)
+        if (self_class == neighbor_class) {
+            return result;
+        }
+        
+        // Different transparency classes: generate faces for BOTH blocks!
+        // Face 1: self's face (facing toward neighbor, normal pointing into neighbor)
+        result.has_face1 = true;
+        result.face1.voxel = voxel;
+        result.face1.axis = axis;
+        result.face1.inward = false;  // normal points outward from self toward neighbor
+        result.face1.material = texture_index[self_mat];
+        result.face1.trans_class = self_class;
+        
+        // Face 2: neighbor's face (facing toward self, normal pointing into self)
+        result.has_face2 = true;
+        result.face2.voxel = voxel;  // same position (it's the boundary)
+        result.face2.axis = axis;
+        result.face2.inward = true;   // normal points inward from neighbor toward self
+        result.face2.material = texture_index[neighbor_mat];
+        result.face2.trans_class = neighbor_class;
+        
+        return result;
+    }
+    
+    // One void, one solid: standard case - single face
+    result.has_face1 = true;
+    result.face1.voxel = voxel;
+    result.face1.axis = axis;
+    // Flip face around if the neighbor is the solid one
+    result.face1.inward = self_mat == 0;
+    // Use texture_index from the non-air voxel
+    uint block_id = (self_mat != 0) ? self_mat : neighbor_mat;
+    result.face1.material = texture_index[block_id];
+    result.face1.trans_class = get_transparency_class(block_id);
+    
+    return result;
 }
 
 // Compute the occlusion state based on the three voxels surrounding an exposed vertex:
@@ -102,8 +202,17 @@ uint vertex_occlusion(bool a, bool b, bool c) {
     return b && c ? 0 : (3 - uint(a) - uint(b) - uint(c));
 }
 
+// Check if a voxel is an occluder for a given transparency class
+// Only blocks of the same transparency class can occlude each other
+bool is_occluder(ivec3 coords, uint trans_class) {
+    uint mat = get_voxel(coords);
+    if (mat == 0) return false;
+    return get_transparency_class(mat) == trans_class;
+}
+
 // Compute the occlusion state for each vertex on a surface
-uvec4 surface_occlusion(ivec3 voxel, uint axis, bool inward) {
+// Only considers blocks of the same transparency class as occluders
+uvec4 surface_occlusion(ivec3 voxel, uint axis, bool inward, uint trans_class) {
     // U/V axes on this surface
     const ivec3 uvs[3][2] = {
         {{0, 1, 0}, {0, 0, 1}},
@@ -121,14 +230,14 @@ uvec4 surface_occlusion(ivec3 voxel, uint axis, bool inward) {
     // 3 . 4
     // 5 6 7
     bool occluders[8] = {
-        get_voxel(voxel - u - v) != 0,
-        get_voxel(voxel     - v) != 0,
-        get_voxel(voxel + u - v) != 0,
-        get_voxel(voxel - u    ) != 0,
-        get_voxel(voxel + u    ) != 0,
-        get_voxel(voxel - u + v) != 0,
-        get_voxel(voxel     + v) != 0,
-        get_voxel(voxel + u + v) != 0,
+        is_occluder(voxel - u - v, trans_class),
+        is_occluder(voxel     - v, trans_class),
+        is_occluder(voxel + u - v, trans_class),
+        is_occluder(voxel - u    , trans_class),
+        is_occluder(voxel + u    , trans_class),
+        is_occluder(voxel - u + v, trans_class),
+        is_occluder(voxel     + v, trans_class),
+        is_occluder(voxel + u + v, trans_class),
     };
     return uvec4(
         vertex_occlusion(occluders[0], occluders[1], occluders[3]),
@@ -139,31 +248,81 @@ uvec4 surface_occlusion(ivec3 voxel, uint axis, bool inward) {
 }
 
 void main() {
-    // Determine whether this thread generates a face
-    Face info;
-    bool has_face = find_face(info);
+    // Determine whether this thread generates faces (may be 0, 1, or 2)
+    FaceResult faces = find_faces();
 
-    // Number of faces in the subgroup
-    uint subgroup_faces = subgroupAdd(uint(has_face));
-
-    // Compute the starting storage offset for this subgroup
-    uint subgroup_offset;
-    if (subgroupElect()) {
-        subgroup_offset = atomicAdd(face_count, subgroup_faces);
-        // Increment the vertex count while we're at it, accounting for two triangles per face.
-        atomicAdd(vertex_count, subgroup_faces * 6);
+    // Count faces by transparency class (each thread may contribute 0, 1, or 2 faces per class)
+    uint my_opaque = 0;
+    uint my_cutout = 0;
+    uint my_translucent = 0;
+    
+    if (faces.has_face1) {
+        if (faces.face1.trans_class == TRANSPARENCY_OPAQUE) my_opaque++;
+        else if (faces.face1.trans_class == TRANSPARENCY_CUTOUT) my_cutout++;
+        else if (faces.face1.trans_class == TRANSPARENCY_TRANSLUCENT) my_translucent++;
     }
-    subgroup_offset = subgroupBroadcastFirst(subgroup_offset);
+    if (faces.has_face2) {
+        if (faces.face2.trans_class == TRANSPARENCY_OPAQUE) my_opaque++;
+        else if (faces.face2.trans_class == TRANSPARENCY_CUTOUT) my_cutout++;
+        else if (faces.face2.trans_class == TRANSPARENCY_TRANSLUCENT) my_translucent++;
+    }
 
-    if (!has_face) return;
+    // Count faces in each class within subgroup
+    uint subgroup_opaque = subgroupAdd(my_opaque);
+    uint subgroup_cutout = subgroupAdd(my_cutout);
+    uint subgroup_translucent = subgroupAdd(my_translucent);
 
-    // Write the thread's face
-    uint thread_offset = subgroupExclusiveAdd(uint(has_face));
-    surfaces[subgroup_offset + thread_offset] = surface(
-        info.voxel,
-        info.axis,
-        info.inward ^^ reverse_winding,
-        info.material,
-        surface_occlusion(info.voxel, info.axis, info.inward)
-    );
+    // Compute starting storage offsets for each class
+    uint opaque_offset;
+    uint cutout_offset;
+    uint translucent_offset;
+    if (subgroupElect()) {
+        opaque_offset = atomicAdd(opaque_face_count, subgroup_opaque);
+        cutout_offset = atomicAdd(cutout_face_count, subgroup_cutout);
+        translucent_offset = atomicAdd(translucent_face_count, subgroup_translucent);
+        // Increment vertex counts (6 vertices per face)
+        atomicAdd(opaque_vertex_count, subgroup_opaque * 6);
+        atomicAdd(cutout_vertex_count, subgroup_cutout * 6);
+        atomicAdd(translucent_vertex_count, subgroup_translucent * 6);
+    }
+    opaque_offset = subgroupBroadcastFirst(opaque_offset);
+    cutout_offset = subgroupBroadcastFirst(cutout_offset);
+    translucent_offset = subgroupBroadcastFirst(translucent_offset);
+
+    if (!faces.has_face1 && !faces.has_face2) return;
+
+    // Compute per-thread offsets for each class
+    uint my_opaque_offset = subgroupExclusiveAdd(my_opaque);
+    uint my_cutout_offset = subgroupExclusiveAdd(my_cutout);
+    uint my_translucent_offset = subgroupExclusiveAdd(my_translucent);
+
+    // Helper function to write a face
+    #define WRITE_FACE(face) do { \
+        Surface s = surface( \
+            face.voxel, \
+            face.axis, \
+            face.inward ^^ reverse_winding, \
+            face.material, \
+            surface_occlusion(face.voxel, face.axis, face.inward, face.trans_class) \
+        ); \
+        if (face.trans_class == TRANSPARENCY_OPAQUE) { \
+            surfaces_opaque[opaque_offset + my_opaque_offset] = s; \
+            my_opaque_offset++; \
+        } else if (face.trans_class == TRANSPARENCY_CUTOUT) { \
+            surfaces_cutout[cutout_offset + my_cutout_offset] = s; \
+            my_cutout_offset++; \
+        } else if (face.trans_class == TRANSPARENCY_TRANSLUCENT) { \
+            surfaces_translucent[translucent_offset + my_translucent_offset] = s; \
+            my_translucent_offset++; \
+        } \
+    } while(false)
+
+    if (faces.has_face1) {
+        WRITE_FACE(faces.face1);
+    }
+    if (faces.has_face2) {
+        WRITE_FACE(faces.face2);
+    }
+    
+    #undef WRITE_FACE
 }

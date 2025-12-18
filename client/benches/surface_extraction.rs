@@ -4,7 +4,7 @@ use ash::vk;
 use bencher::{Bencher, benchmark_group, benchmark_main};
 
 use client::graphics::{
-    Base,
+    Base, TransparencyMap,
     voxels::surface_extraction::{self, ExtractTask, SurfaceExtraction},
 };
 //use common::world::Material;
@@ -12,7 +12,10 @@ use client::graphics::{
 fn extract(bench: &mut Bencher) {
     let gfx = Arc::new(Base::headless());
     let extract = SurfaceExtraction::new(&gfx);
-    let mut scratch = surface_extraction::ScratchBuffer::new(&gfx, &extract, BATCH_SIZE, DIMENSION);
+    // Use default transparency map for benchmarks
+    let transparency_map = TransparencyMap::default();
+    let mut scratch =
+        surface_extraction::ScratchBuffer::new(&gfx, &extract, BATCH_SIZE, DIMENSION, &transparency_map);
     let draw = surface_extraction::DrawBuffer::new(&gfx, BATCH_SIZE, DIMENSION);
     let device = &*gfx.device;
 
@@ -40,16 +43,16 @@ fn extract(bench: &mut Bencher) {
             .map(|i| ExtractTask {
                 index: i,
                 draw_id: i,
-                indirect_offset: draw.indirect_offset(i),
-                face_offset: draw.face_offset(i),
+                indirect_offsets: draw.indirect_offsets(i),
+                face_offsets: draw.face_offsets(i),
                 reverse_winding: false,
             })
             .collect::<Vec<_>>();
         scratch.extract(
             device,
             &extract,
-            draw.indirect_buffer(),
-            draw.face_buffer(),
+            draw.indirect_buffers(),
+            draw.face_buffers(),
             cmd,
             &batch,
         );

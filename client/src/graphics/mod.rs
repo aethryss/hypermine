@@ -10,6 +10,7 @@ mod gui;
 mod meshes;
 mod png;
 mod png_array;
+pub mod transparency;
 pub mod voxels;
 mod window;
 
@@ -24,8 +25,9 @@ pub use self::{
     frustum::Frustum,
     gltf_mesh::{GlbFile, GltfScene},
     meshes::{Mesh, Meshes},
-    png::Png,
+    png::{Png, TerrainAtlas, TerrainAtlasPng},
     png_array::PngArray,
+    transparency::{TransparencyClass, TransparencyMap},
     voxels::Voxels,
     window::{EarlyWindow, Window},
 };

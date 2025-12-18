@@ -5,10 +5,13 @@ use ash::{Device, vk};
 use lahar::{DedicatedBuffer, DedicatedMapping};
 use vk_shader_macros::include_glsl;
 
-use crate::graphics::{Base, VkDrawIndirectCommand, as_bytes};
+use crate::graphics::{Base, TransparencyMap, VkDrawIndirectCommand, as_bytes};
 use common::{defer, world::BlockRegistry};
 
 const EXTRACT: &[u32] = include_glsl!("shaders/surface-extraction/extract.comp", target: vulkan1_1);
+
+/// Number of transparency classes (opaque, cutout, translucent)
+pub const TRANSPARENCY_CLASS_COUNT: usize = 3;
 
 /// GPU-accelerated surface extraction from voxel chunks
 pub struct SurfaceExtraction {
@@ -34,6 +37,13 @@ impl SurfaceExtraction {
                         },
                         vk::DescriptorSetLayoutBinding {
                             binding: 1,
+                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            ..Default::default()
+                        },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 2,
                             descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
                             descriptor_count: 1,
                             stage_flags: vk::ShaderStageFlags::COMPUTE,
@@ -69,6 +79,34 @@ impl SurfaceExtraction {
                         },
                         vk::DescriptorSetLayoutBinding {
                             binding: 3,
+                            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            ..Default::default()
+                        },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 4,
+                            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            ..Default::default()
+                        },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 5,
+                            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            ..Default::default()
+                        },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 6,
+                            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            ..Default::default()
+                        },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 7,
                             descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                             descriptor_count: 1,
                             stage_flags: vk::ShaderStageFlags::COMPUTE,
@@ -167,9 +205,10 @@ pub struct ScratchBuffer {
     dimension: u32,
     params: DedicatedBuffer,
     texture_indices: DedicatedMapping<[u32]>, // Maps BlockID to texture_index
+    transparency_classes: DedicatedMapping<[u32]>, // Maps texture_index to transparency class
     /// Size of a single entry in the voxel buffer
     voxel_buffer_unit: vk::DeviceSize,
-    /// Size of a single entry in the state buffer
+    /// Size of a single entry in the state buffer (3 face counts)
     state_buffer_unit: vk::DeviceSize,
     voxels_staging: DedicatedMapping<[u16]>,
     voxels: DedicatedBuffer,
@@ -182,7 +221,13 @@ pub struct ScratchBuffer {
 }
 
 impl ScratchBuffer {
-    pub fn new(gfx: &Base, ctx: &SurfaceExtraction, concurrency: u32, dimension: u32) -> Self {
+    pub fn new(
+        gfx: &Base,
+        ctx: &SurfaceExtraction,
+        concurrency: u32,
+        dimension: u32,
+        transparency_map: &TransparencyMap,
+    ) -> Self {
         let device = &*gfx.device;
         // Padded by 2 on each dimension so each voxel of interest has a full neighborhood
         let voxel_buffer_unit = round_up(
@@ -192,7 +237,11 @@ impl ScratchBuffer {
         );
         let voxels_size = concurrency as vk::DeviceSize * voxel_buffer_unit;
 
-        let state_buffer_unit = round_up(4, gfx.limits.min_storage_buffer_offset_alignment);
+        // 3 face counts, one per transparency class
+        let state_buffer_unit = round_up(
+            4 * TRANSPARENCY_CLASS_COUNT as vk::DeviceSize,
+            gfx.limits.min_storage_buffer_offset_alignment,
+        );
         unsafe {
             let params = DedicatedBuffer::new(
                 device,
@@ -230,6 +279,36 @@ impl ScratchBuffer {
                 texture_indices[i] = val;
             }
             gfx.set_name(texture_indices.buffer(), cstr!("texture indices"));
+
+            // Create transparency_classes lookup buffer (block_id to TransparencyClass mapping)
+            // We need to map block_id -> texture_index -> transparency_class
+            let mut transparency_classes = DedicatedMapping::<[u32]>::zeroed_array(
+                device,
+                &gfx.memory_properties,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                256,
+            );
+            for (block_id, block) in BlockRegistry::all_blocks().iter().enumerate() {
+                let texture_index = block.texture_index as usize;
+                let class = transparency_map.classes().get(texture_index).copied()
+                    .unwrap_or(crate::graphics::TransparencyClass::Opaque);
+                transparency_classes[block_id] = class as u32;
+
+                // Log non-opaque blocks for debugging
+                if class != crate::graphics::TransparencyClass::Opaque {
+                    tracing::info!(
+                        block_id,
+                        block_name = block.name,
+                        texture_index,
+                        ?class,
+                        "non-opaque block"
+                    );
+                }
+            }
+            gfx.set_name(
+                transparency_classes.buffer(),
+                cstr!("transparency classes"),
+            );
 
             let voxels_staging = DedicatedMapping::zeroed_array(
                 device,
@@ -272,11 +351,13 @@ impl ScratchBuffer {
                         .pool_sizes(&[
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                                descriptor_count: 2, // params + texture_indices
+                                // params + texture_indices + transparency_classes
+                                descriptor_count: 3,
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                                descriptor_count: 4 * concurrency,
+                                // Per task: voxels + state + 3 indirect + 3 faces = 8
+                                descriptor_count: 8 * concurrency,
                             },
                         ]),
                     None,
@@ -314,6 +395,15 @@ impl ScratchBuffer {
                             offset: 0,
                             range: vk::WHOLE_SIZE,
                         }]),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(params_ds)
+                        .dst_binding(2)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .buffer_info(&[vk::DescriptorBufferInfo {
+                            buffer: transparency_classes.buffer(),
+                            offset: 0,
+                            range: vk::WHOLE_SIZE,
+                        }]),
                 ],
                 &[],
             );
@@ -322,6 +412,7 @@ impl ScratchBuffer {
                 dimension,
                 params,
                 texture_indices,
+                transparency_classes,
                 voxel_buffer_unit,
                 state_buffer_unit,
                 voxels_staging,
@@ -359,8 +450,8 @@ impl ScratchBuffer {
         &mut self,
         device: &Device,
         ctx: &SurfaceExtraction,
-        indirect_buffer: vk::Buffer,
-        face_buffer: vk::Buffer,
+        indirect_buffers: [vk::Buffer; TRANSPARENCY_CLASS_COUNT],
+        face_buffers: [vk::Buffer; TRANSPARENCY_CLASS_COUNT],
         cmd: vk::CommandBuffer,
         tasks: &[ExtractTask],
     ) {
@@ -386,22 +477,24 @@ impl ScratchBuffer {
             // handful of times at startup? Perhaps we're freeing and reusing
             // storage before the previous draw completes, and validation is somehow
             // smart enough to notice?
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::VERTEX_SHADER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                Default::default(),
-                &[],
-                &[vk::BufferMemoryBarrier {
-                    buffer: face_buffer,
-                    src_access_mask: vk::AccessFlags::SHADER_READ,
-                    dst_access_mask: vk::AccessFlags::SHADER_WRITE,
-                    offset: 0,
-                    size: vk::WHOLE_SIZE,
-                    ..Default::default()
-                }],
-                &[],
-            );
+            for face_buffer in face_buffers {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::VERTEX_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    Default::default(),
+                    &[],
+                    &[vk::BufferMemoryBarrier {
+                        buffer: face_buffer,
+                        src_access_mask: vk::AccessFlags::SHADER_READ,
+                        dst_access_mask: vk::AccessFlags::SHADER_WRITE,
+                        offset: 0,
+                        size: vk::WHOLE_SIZE,
+                        ..Default::default()
+                    }],
+                    &[],
+                );
+            }
 
             // Prepare shared state
             device.cmd_update_buffer(
@@ -458,15 +551,16 @@ impl ScratchBuffer {
                             .buffer_info(&[vk::DescriptorBufferInfo {
                                 buffer: self.state.handle,
                                 offset: self.state_buffer_unit * vk::DeviceSize::from(task.index),
-                                range: 4,
+                                range: 4 * TRANSPARENCY_CLASS_COUNT as vk::DeviceSize,
                             }]),
+                        // Indirect buffers for each transparency class
                         vk::WriteDescriptorSet::default()
                             .dst_set(self.descriptor_sets[index])
                             .dst_binding(2)
                             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                             .buffer_info(&[vk::DescriptorBufferInfo {
-                                buffer: indirect_buffer,
-                                offset: task.indirect_offset,
+                                buffer: indirect_buffers[0],
+                                offset: task.indirect_offsets[0],
                                 range: INDIRECT_SIZE,
                             }]),
                         vk::WriteDescriptorSet::default()
@@ -474,8 +568,45 @@ impl ScratchBuffer {
                             .dst_binding(3)
                             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                             .buffer_info(&[vk::DescriptorBufferInfo {
-                                buffer: face_buffer,
-                                offset: task.face_offset,
+                                buffer: indirect_buffers[1],
+                                offset: task.indirect_offsets[1],
+                                range: INDIRECT_SIZE,
+                            }]),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(self.descriptor_sets[index])
+                            .dst_binding(4)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&[vk::DescriptorBufferInfo {
+                                buffer: indirect_buffers[2],
+                                offset: task.indirect_offsets[2],
+                                range: INDIRECT_SIZE,
+                            }]),
+                        // Face buffers for each transparency class
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(self.descriptor_sets[index])
+                            .dst_binding(5)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&[vk::DescriptorBufferInfo {
+                                buffer: face_buffers[0],
+                                offset: task.face_offsets[0],
+                                range: max_faces as vk::DeviceSize * FACE_SIZE,
+                            }]),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(self.descriptor_sets[index])
+                            .dst_binding(6)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&[vk::DescriptorBufferInfo {
+                                buffer: face_buffers[1],
+                                offset: task.face_offsets[1],
+                                range: max_faces as vk::DeviceSize * FACE_SIZE,
+                            }]),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(self.descriptor_sets[index])
+                            .dst_binding(7)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&[vk::DescriptorBufferInfo {
+                                buffer: face_buffers[2],
+                                offset: task.face_offsets[2],
                                 range: max_faces as vk::DeviceSize * FACE_SIZE,
                             }]),
                     ],
@@ -492,17 +623,20 @@ impl ScratchBuffer {
                         size: voxels_range,
                     }],
                 );
-                device.cmd_update_buffer(
-                    cmd,
-                    indirect_buffer,
-                    task.indirect_offset,
-                    as_bytes(&VkDrawIndirectCommand {
-                        vertex_count: 0,
-                        instance_count: 1,
-                        first_vertex: (task.face_offset / FACE_SIZE) as u32 * 6,
-                        first_instance: task.draw_id,
-                    }),
-                )
+                // Initialize indirect commands for all 3 transparency classes
+                for class_idx in 0..TRANSPARENCY_CLASS_COUNT {
+                    device.cmd_update_buffer(
+                        cmd,
+                        indirect_buffers[class_idx],
+                        task.indirect_offsets[class_idx],
+                        as_bytes(&VkDrawIndirectCommand {
+                            vertex_count: 0,
+                            instance_count: 1,
+                            first_vertex: (task.face_offsets[class_idx] / FACE_SIZE) as u32 * 6,
+                            first_instance: task.draw_id,
+                        }),
+                    );
+                }
             }
 
             device.cmd_pipeline_barrier(
@@ -564,6 +698,7 @@ impl ScratchBuffer {
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             self.params.destroy(device);
             self.texture_indices.destroy(device);
+            self.transparency_classes.destroy(device);
             self.voxels_staging.destroy(device);
             self.voxels.destroy(device);
             self.state.destroy(device);
@@ -574,8 +709,10 @@ impl ScratchBuffer {
 /// Specifies a single chunk's worth of surface extraction work
 #[derive(Debug, Copy, Clone)]
 pub struct ExtractTask {
-    pub indirect_offset: vk::DeviceSize,
-    pub face_offset: vk::DeviceSize,
+    /// Offset into indirect buffers for each transparency class
+    pub indirect_offsets: [vk::DeviceSize; TRANSPARENCY_CLASS_COUNT],
+    /// Offset into face buffers for each transparency class
+    pub face_offsets: [vk::DeviceSize; TRANSPARENCY_CLASS_COUNT],
     pub index: u32,
     pub draw_id: u32,
     pub reverse_winding: bool,
@@ -604,8 +741,10 @@ struct Params {
 
 /// Manages storage for ready-to-render voxels
 pub struct DrawBuffer {
-    indirect: DedicatedBuffer,
-    faces: DedicatedBuffer,
+    /// One indirect buffer per transparency class
+    indirect: [DedicatedBuffer; TRANSPARENCY_CLASS_COUNT],
+    /// One face buffer per transparency class
+    faces: [DedicatedBuffer; TRANSPARENCY_CLASS_COUNT],
     dimension: u32,
     face_buffer_unit: vk::DeviceSize,
     count: u32,
@@ -625,31 +764,40 @@ impl DrawBuffer {
         let face_buffer_size = count as vk::DeviceSize * face_buffer_unit;
 
         unsafe {
-            let indirect = DedicatedBuffer::new(
-                device,
-                &gfx.memory_properties,
-                &vk::BufferCreateInfo::default()
-                    .size(count as vk::DeviceSize * INDIRECT_SIZE)
-                    .usage(
-                        vk::BufferUsageFlags::STORAGE_BUFFER
-                            | vk::BufferUsageFlags::INDIRECT_BUFFER
-                            | vk::BufferUsageFlags::TRANSFER_DST,
-                    )
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            );
-            gfx.set_name(indirect.handle, cstr!("indirect"));
+            let class_names = ["opaque", "cutout", "translucent"];
+            let indirect = std::array::from_fn(|i| {
+                let buf = DedicatedBuffer::new(
+                    device,
+                    &gfx.memory_properties,
+                    &vk::BufferCreateInfo::default()
+                        .size(count as vk::DeviceSize * INDIRECT_SIZE)
+                        .usage(
+                            vk::BufferUsageFlags::STORAGE_BUFFER
+                                | vk::BufferUsageFlags::INDIRECT_BUFFER
+                                | vk::BufferUsageFlags::TRANSFER_DST,
+                        )
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                );
+                let name = format!("indirect_{}\0", class_names[i]);
+                gfx.set_name(buf.handle, std::ffi::CStr::from_bytes_with_nul(name.as_bytes()).unwrap());
+                buf
+            });
 
-            let faces = DedicatedBuffer::new(
-                device,
-                &gfx.memory_properties,
-                &vk::BufferCreateInfo::default()
-                    .size(face_buffer_size)
-                    .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            );
-            gfx.set_name(faces.handle, cstr!("faces"));
+            let faces = std::array::from_fn(|i| {
+                let buf = DedicatedBuffer::new(
+                    device,
+                    &gfx.memory_properties,
+                    &vk::BufferCreateInfo::default()
+                        .size(face_buffer_size)
+                        .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                );
+                let name = format!("faces_{}\0", class_names[i]);
+                gfx.set_name(buf.handle, std::ffi::CStr::from_bytes_with_nul(name.as_bytes()).unwrap());
+                buf
+            });
 
             Self {
                 indirect,
@@ -661,14 +809,24 @@ impl DrawBuffer {
         }
     }
 
-    /// Buffer containing face data
-    pub fn face_buffer(&self) -> vk::Buffer {
-        self.faces.handle
+    /// Buffers containing face data, one per transparency class
+    pub fn face_buffers(&self) -> [vk::Buffer; TRANSPARENCY_CLASS_COUNT] {
+        std::array::from_fn(|i| self.faces[i].handle)
     }
 
-    /// Buffer containing face counts for use with cmd_draw_indirect
-    pub fn indirect_buffer(&self) -> vk::Buffer {
-        self.indirect.handle
+    /// Buffers containing face counts for use with cmd_draw_indirect, one per transparency class
+    pub fn indirect_buffers(&self) -> [vk::Buffer; TRANSPARENCY_CLASS_COUNT] {
+        std::array::from_fn(|i| self.indirect[i].handle)
+    }
+
+    /// Buffer containing face data for a specific transparency class
+    pub fn face_buffer(&self, class_idx: usize) -> vk::Buffer {
+        self.faces[class_idx].handle
+    }
+
+    /// Buffer containing face counts for use with cmd_draw_indirect for a specific transparency class
+    pub fn indirect_buffer(&self, class_idx: usize) -> vk::Buffer {
+        self.indirect[class_idx].handle
     }
 
     /// The offset into the face buffer at which a chunk's face data can be found
@@ -677,10 +835,22 @@ impl DrawBuffer {
         vk::DeviceSize::from(chunk) * self.face_buffer_unit
     }
 
+    /// The offsets into all face buffers at which a chunk's face data can be found
+    pub fn face_offsets(&self, chunk: u32) -> [vk::DeviceSize; TRANSPARENCY_CLASS_COUNT] {
+        let offset = self.face_offset(chunk);
+        [offset; TRANSPARENCY_CLASS_COUNT]
+    }
+
     /// The offset into the indirect buffer at which a chunk's face data can be found
     pub fn indirect_offset(&self, chunk: u32) -> vk::DeviceSize {
         assert!(chunk < self.count);
         vk::DeviceSize::from(chunk) * INDIRECT_SIZE
+    }
+
+    /// The offsets into all indirect buffers at which a chunk's face data can be found
+    pub fn indirect_offsets(&self, chunk: u32) -> [vk::DeviceSize; TRANSPARENCY_CLASS_COUNT] {
+        let offset = self.indirect_offset(chunk);
+        [offset; TRANSPARENCY_CLASS_COUNT]
     }
 
     /// Number of voxels along a chunk edge
@@ -690,8 +860,12 @@ impl DrawBuffer {
 
     pub unsafe fn destroy(&mut self, device: &Device) {
         unsafe {
-            self.indirect.destroy(device);
-            self.faces.destroy(device);
+            for buf in &mut self.indirect {
+                buf.destroy(device);
+            }
+            for buf in &mut self.faces {
+                buf.destroy(device);
+            }
         }
     }
 }

@@ -84,8 +84,11 @@ impl Fog {
                             &vk::PipelineColorBlendStateCreateInfo::default().attachments(&[
                                 vk::PipelineColorBlendAttachmentState {
                                     blend_enable: vk::TRUE,
-                                    src_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-                                    dst_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
+                                    // final = fog_color × fog_alpha + scene × (1 - fog_alpha)
+                                    // fog_alpha = 0 near camera (keep scene)
+                                    // fog_alpha = 1 at distance (show sky/fog)
+                                    src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
+                                    dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
                                     color_blend_op: vk::BlendOp::ADD,
                                     color_write_mask: vk::ColorComponentFlags::R
                                         | vk::ColorComponentFlags::G

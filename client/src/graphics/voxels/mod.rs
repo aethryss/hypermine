@@ -12,7 +12,7 @@ use tracing::warn;
 
 use crate::{
     Config, Loader, Sim,
-    graphics::{Base, Frustum},
+    graphics::{Base, Frustum, TransparencyMap},
 };
 use common::{
     LruSlab,
@@ -43,6 +43,7 @@ impl Voxels {
         loader: &mut Loader,
         dimension: u32,
         frames: u32,
+        transparency_map: &TransparencyMap,
     ) -> Self {
         let max_faces = 3 * (dimension.pow(3) + dimension.pow(2));
         let max_supported_chunks = gfx.limits.max_storage_buffer_range / (8 * max_faces);
@@ -63,6 +64,7 @@ impl Voxels {
             &surface_extraction,
             config.chunk_load_parallelism * frames,
             dimension,
+            transparency_map,
         );
         Self {
             config,
@@ -183,8 +185,8 @@ impl Voxels {
                     let node_is_odd = sim.graph.depth(node) & 1 != 0;
                     extractions.push(ExtractTask {
                         index: scratch_slot,
-                        indirect_offset: self.surfaces.indirect_offset(slot.0),
-                        face_offset: self.surfaces.face_offset(slot.0),
+                        indirect_offsets: self.surfaces.indirect_offsets(slot.0),
+                        face_offsets: self.surfaces.face_offsets(slot.0),
                         draw_id: slot.0,
                         reverse_winding: vertex.parity() ^ node_is_odd,
                     });
@@ -195,8 +197,8 @@ impl Voxels {
             self.extraction_scratch.extract(
                 device,
                 &self.surface_extraction,
-                self.surfaces.indirect_buffer(),
-                self.surfaces.face_buffer(),
+                self.surfaces.indirect_buffers(),
+                self.surfaces.face_buffers(),
                 cmd,
                 &extractions,
             );
@@ -224,9 +226,18 @@ impl Voxels {
             ) {
                 return;
             }
-            for chunk in &frame.drawn {
-                self.draw.draw(device, cmd, &self.surfaces, chunk.0);
+
+            // Draw in order: Opaque -> Cutout -> Translucent
+            // This ensures proper depth handling and blending
+            for class_idx in 0..surface_extraction::TRANSPARENCY_CLASS_COUNT {
+                self.draw
+                    .bind_transparency_class(device, common_ds, cmd, class_idx);
+                for chunk in &frame.drawn {
+                    self.draw
+                        .draw(device, cmd, &self.surfaces, chunk.0, class_idx);
+                }
             }
+
             histogram!("frame.cpu.voxels.draw").record(started.elapsed());
         }
     }

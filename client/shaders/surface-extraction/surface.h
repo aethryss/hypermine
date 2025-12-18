@@ -1,6 +1,11 @@
 #ifndef SURFACE_EXTRACTION_SURFACE_H_
 #define SURFACE_EXTRACTION_SURFACE_H_
 
+// Transparency classes for render ordering
+#define TRANSPARENCY_OPAQUE 0
+#define TRANSPARENCY_CUTOUT 1
+#define TRANSPARENCY_TRANSLUCENT 2
+
 // A face between a voxel and its neighbor in the -X, -Y, or -Z direction
 struct Surface {
     // From most to least significant byte, (axis, z, y, x)

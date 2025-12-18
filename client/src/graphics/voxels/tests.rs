@@ -5,15 +5,17 @@ use lahar::DedicatedMapping;
 use renderdoc::{RenderDoc, V110};
 
 use super::{SurfaceExtraction, surface_extraction};
-use crate::graphics::{Base, VkDrawIndirectCommand};
+use crate::graphics::{Base, TransparencyMap, VkDrawIndirectCommand};
 use common::world::BlockID;
 
 struct SurfaceExtractionTest {
     gfx: Arc<Base>,
     extract: SurfaceExtraction,
     scratch: surface_extraction::ScratchBuffer,
-    indirect: DedicatedMapping<VkDrawIndirectCommand>,
-    surfaces: DedicatedMapping<[Surface]>,
+    /// One indirect buffer per transparency class
+    indirect: [DedicatedMapping<VkDrawIndirectCommand>; surface_extraction::TRANSPARENCY_CLASS_COUNT],
+    /// One surfaces buffer per transparency class
+    surfaces: [DedicatedMapping<[Surface]>; surface_extraction::TRANSPARENCY_CLASS_COUNT],
     cmd_pool: vk::CommandPool,
     cmd: vk::CommandBuffer,
     rd: Option<RenderDoc<V110>>,
@@ -23,23 +25,29 @@ impl SurfaceExtractionTest {
     pub fn new() -> Self {
         let gfx = Arc::new(Base::headless());
         let extract = SurfaceExtraction::new(&gfx);
-        let scratch = surface_extraction::ScratchBuffer::new(&gfx, &extract, 1, DIMENSION as u32);
+        let transparency_map = TransparencyMap::default();
+        let scratch =
+            surface_extraction::ScratchBuffer::new(&gfx, &extract, 1, DIMENSION as u32, &transparency_map);
 
         let device = &*gfx.device;
 
         unsafe {
-            let indirect = DedicatedMapping::<VkDrawIndirectCommand>::zeroed(
-                device,
-                &gfx.memory_properties,
-                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            );
+            let indirect = std::array::from_fn(|_| {
+                DedicatedMapping::<VkDrawIndirectCommand>::zeroed(
+                    device,
+                    &gfx.memory_properties,
+                    vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                )
+            });
 
-            let surfaces = DedicatedMapping::<[Surface]>::zeroed_array(
-                device,
-                &gfx.memory_properties,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
-                3 * (DIMENSION.pow(3) + DIMENSION.pow(2)),
-            );
+            let surfaces = std::array::from_fn(|_| {
+                DedicatedMapping::<[Surface]>::zeroed_array(
+                    device,
+                    &gfx.memory_properties,
+                    vk::BufferUsageFlags::STORAGE_BUFFER,
+                    3 * (DIMENSION.pow(3) + DIMENSION.pow(2)),
+                )
+            });
 
             let cmd_pool = device
                 .create_command_pool(
@@ -87,15 +95,18 @@ impl SurfaceExtractionTest {
                 )
                 .unwrap();
 
+            let indirect_buffers = std::array::from_fn(|i| self.indirect[i].buffer());
+            let surface_buffers = std::array::from_fn(|i| self.surfaces[i].buffer());
+
             self.scratch.extract(
                 device,
                 &self.extract,
-                self.indirect.buffer(),
-                self.surfaces.buffer(),
+                indirect_buffers,
+                surface_buffers,
                 self.cmd,
                 &[surface_extraction::ExtractTask {
-                    indirect_offset: 0,
-                    face_offset: 0,
+                    indirect_offsets: [0; surface_extraction::TRANSPARENCY_CLASS_COUNT],
+                    face_offsets: [0; surface_extraction::TRANSPARENCY_CLASS_COUNT],
                     index: 0,
                     draw_id: 0,
                     reverse_winding: false,
@@ -125,8 +136,12 @@ impl Drop for SurfaceExtractionTest {
         unsafe {
             self.extract.destroy(device);
             self.scratch.destroy(device);
-            self.indirect.destroy(device);
-            self.surfaces.destroy(device);
+            for buf in &mut self.indirect {
+                buf.destroy(device);
+            }
+            for buf in &mut self.surfaces {
+                buf.destroy(device);
+            }
             device.destroy_command_pool(self.cmd_pool, None);
         }
     }
