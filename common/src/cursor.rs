@@ -135,6 +135,88 @@ mod tests {
     use super::*;
     use crate::{proto::Position, traversal::ensure_nearby};
 
+    fn cube_vertex_nodes_ensuring(graph: &mut Graph, chunk: ChunkId) -> Vec<NodeId> {
+        // Each chunk corresponds to a cube in the dual honeycomb.
+        // The cube's 8 vertices are at centers of (dodecahedral) nodes.
+        // `Vertex::dual_vertices()` encodes how to reach each of those 8 nodes from `chunk.node`.
+        let mut out = Vec::with_capacity(8);
+        for (_coords, path) in chunk.vertex.dual_vertices() {
+            let mut node = chunk.node;
+            for side in path {
+                // Lazily allocate the node graph so cube vertices are always resolvable.
+                node = graph.ensure_neighbor(node, side);
+            }
+            out.push(node);
+        }
+        out
+    }
+
+    fn shares_any_cube_vertex_ensuring(
+        graph: &mut Graph,
+        a: ChunkId,
+        b_vertex_nodes: &[NodeId],
+    ) -> bool {
+        let a_nodes = cube_vertex_nodes_ensuring(graph, a);
+        a_nodes
+            .into_iter()
+            .any(|n| b_vertex_nodes.iter().any(|&m| m == n))
+    }
+
+    fn step_ensuring(graph: &mut Graph, cursor: Cursor, dir: Dir) -> Cursor {
+        // Mirror Cursor::step, but allocate missing neighbor nodes on demand.
+        let (a, b, c) = (cursor.a, cursor.b, cursor.c);
+        let a_prime = NEIGHBORS[a as usize][b as usize][c as usize].unwrap();
+        let b_prime = NEIGHBORS[b as usize][a as usize][c as usize].unwrap();
+        let c_prime = NEIGHBORS[c as usize][b as usize][a as usize].unwrap();
+        use Dir::*;
+        let (sides, neighbor) = match dir {
+            Left => ((a, b, c_prime), c),
+            Right => ((a, b, c_prime), c_prime),
+            Down => ((a, b_prime, c), b),
+            Up => ((a, b_prime, c), b_prime),
+            Forward => ((a_prime, b, c), a),
+            Back => ((a_prime, b, c), a_prime),
+        };
+        let node = graph.ensure_neighbor(cursor.node, neighbor);
+        Cursor {
+            node,
+            a: sides.0,
+            b: sides.1,
+            c: sides.2,
+        }
+    }
+
+    fn enumerate_chunks_sharing_any_vertex_with(
+        graph: &mut Graph,
+        start: ChunkId,
+        start_vertex_nodes: &[NodeId],
+    ) -> Vec<ChunkId> {
+        use std::collections::VecDeque;
+        let mut visited = fxhash::FxHashSet::<ChunkId>::default();
+        let mut queue = VecDeque::<ChunkId>::new();
+
+        visited.insert(start);
+        queue.push_back(start);
+
+        while let Some(current) = queue.pop_front() {
+            let cursor = Cursor::from_vertex(current.node, current.vertex);
+            for dir in Dir::iter() {
+                let next_cursor = step_ensuring(graph, cursor, dir);
+                let next_chunk = next_cursor.canonicalize(graph).unwrap();
+                if visited.contains(&next_chunk) {
+                    continue;
+                }
+                if !shares_any_cube_vertex_ensuring(graph, next_chunk, start_vertex_nodes) {
+                    continue;
+                }
+                visited.insert(next_chunk);
+                queue.push_back(next_chunk);
+            }
+        }
+
+        visited.into_iter().collect()
+    }
+
     #[test]
     fn neighbor_sanity() {
         for v in Vertex::iter() {
@@ -186,5 +268,24 @@ mod tests {
         vcycle(Dir::Right);
         vcycle(Dir::Forward);
         vcycle(Dir::Back);
+    }
+
+    #[test]
+    fn count_chunks_sharing_vertices() {
+        let mut graph = Graph::new(1);
+
+        let start = ChunkId::new(NodeId::ROOT, Vertex::A);
+        let start = graph.canonicalize(start).unwrap();
+        let start_vertex_nodes = cube_vertex_nodes_ensuring(&mut graph, start);
+
+        let chunks =
+            enumerate_chunks_sharing_any_vertex_with(&mut graph, start, &start_vertex_nodes);
+
+        // Exclude `start` itself from the count.
+        let count = chunks.len().saturating_sub(1);
+        eprintln!("chunks sharing at least one vertex with {start:?}: {count}");
+
+        // Informational: always pass.
+        assert!(count > 0);
     }
 }
