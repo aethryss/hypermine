@@ -1,6 +1,11 @@
+use std::collections::VecDeque;
+
+use fxhash::FxHashSet;
+
 use crate::{
+    cursor::{Cursor, Dir},
     dodeca::Vertex,
-    graph::Graph,
+    graph::{Graph, NodeId},
     math::PermuteXYZ,
     node::{Chunk, ChunkId, VoxelData},
     voxel_math::{ChunkAxisPermutation, ChunkDirection, CoordAxis, CoordSign, Coords},
@@ -217,6 +222,314 @@ fn neighbor_axis_permutation(vertex: Vertex, direction: ChunkDirection) -> Chunk
     match direction.sign {
         CoordSign::Plus => vertex.chunk_axis_permutations()[direction.axis as usize],
         CoordSign::Minus => ChunkAxisPermutation::IDENTITY,
+    }
+}
+
+// ============================================================================
+// Extended Neighbor Enumeration
+// ============================================================================
+//
+// In hyperbolic space with the order-4 dodecahedral honeycomb, a chunk shares
+// at least one vertex with 110 other chunks (compared to 26 in Euclidean space).
+// The following types and functions provide efficient enumeration and querying
+// of all these neighbors.
+
+/// Describes how a neighbor chunk relates to a reference chunk geometrically.
+///
+/// In Euclidean 3-space, a cube has:
+/// - 6 face neighbors (share a 2D face)
+/// - 12 edge neighbors (share a 1D edge but not a face)
+/// - 8 corner neighbors (share only 0D vertices)
+///
+/// In hyperbolic space, the counts are different due to 5 cubes meeting at each
+/// edge instead of 4, but the classification still applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NeighborType {
+    /// Shares a face with the reference chunk. There are always exactly 6 of these.
+    Face,
+    /// Shares an edge but not a face. In hyperbolic space, there are more than 12.
+    Edge,
+    /// Shares only vertices (corners). The count varies based on geometry.
+    Corner,
+}
+
+/// A neighboring chunk along with metadata about its relationship to a reference chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkNeighbor {
+    /// The neighboring chunk's canonical ID.
+    pub chunk: ChunkId,
+    /// The type of adjacency (face, edge, or corner).
+    pub neighbor_type: NeighborType,
+    /// The Manhattan distance in cursor steps from the reference chunk.
+    /// Face neighbors have distance 1, edge neighbors have distance 2, etc.
+    pub distance: u8,
+}
+
+/// Returns the 8 node IDs that correspond to the vertices of the dual cube for the given chunk.
+///
+/// Each chunk is 1/8 of a cube in the dual honeycomb. The cube's 8 vertices are at
+/// centers of dodecahedral nodes. This function returns those 8 node IDs, lazily
+/// allocating nodes in the graph as needed.
+pub fn cube_vertex_nodes(graph: &mut Graph, chunk: ChunkId) -> [NodeId; 8] {
+    let mut result = [chunk.node; 8];
+    for (i, (_coords, path)) in chunk.vertex.dual_vertices().enumerate() {
+        let mut node = chunk.node;
+        for side in path {
+            node = graph.ensure_neighbor(node, side);
+        }
+        result[i] = node;
+    }
+    result
+}
+
+/// Returns the 8 node IDs for the dual cube vertices without allocating new nodes.
+/// Returns `None` if any required node doesn't exist in the graph.
+pub fn try_cube_vertex_nodes(graph: &Graph, chunk: ChunkId) -> Option<[NodeId; 8]> {
+    let mut result = [chunk.node; 8];
+    for (i, (_coords, path)) in chunk.vertex.dual_vertices().enumerate() {
+        let mut node = chunk.node;
+        for side in path {
+            node = graph.neighbor(node, side)?;
+        }
+        result[i] = node;
+    }
+    Some(result)
+}
+
+/// Checks if two chunks share at least one vertex of their dual cubes.
+///
+/// Two chunks are vertex-adjacent if any of their 8 dual-cube vertices coincide.
+pub fn chunks_share_vertex(
+    graph: &mut Graph,
+    chunk_a: ChunkId,
+    chunk_b_vertex_nodes: &[NodeId; 8],
+) -> bool {
+    let a_nodes = cube_vertex_nodes(graph, chunk_a);
+    a_nodes
+        .iter()
+        .any(|n| chunk_b_vertex_nodes.iter().any(|m| *n == *m))
+}
+
+/// Iterator over all chunks that share at least one vertex with a reference chunk.
+///
+/// This performs a breadth-first search from the reference chunk, expanding through
+/// the 6 face-adjacent directions and collecting all chunks whose dual-cube vertices
+/// overlap with the reference chunk's vertices.
+pub struct VertexSharingNeighbors {
+    neighbors: Vec<ChunkNeighbor>,
+    index: usize,
+}
+
+impl VertexSharingNeighbors {
+    /// Enumerate all vertex-sharing neighbors of the given chunk.
+    ///
+    /// This allocates graph nodes as needed during traversal.
+    /// The reference chunk itself is NOT included in the results.
+    pub fn new(graph: &mut Graph, chunk: ChunkId) -> Self {
+        let start = graph.canonicalize(chunk).unwrap_or(chunk);
+        let start_vertex_nodes = cube_vertex_nodes(graph, start);
+
+        let mut visited = FxHashSet::<ChunkId>::default();
+        let mut queue = VecDeque::<(ChunkId, u8)>::new();
+        let mut neighbors = Vec::new();
+
+        visited.insert(start);
+        queue.push_back((start, 0));
+
+        while let Some((current, distance)) = queue.pop_front() {
+            let cursor = Cursor::from_vertex(current.node, current.vertex);
+
+            for dir in Dir::iter() {
+                let next_cursor = cursor.step_ensuring(graph, dir);
+                let Some(next_chunk) = next_cursor.canonicalize(graph) else {
+                    continue;
+                };
+
+                if visited.contains(&next_chunk) {
+                    continue;
+                }
+
+                let next_vertex_nodes = cube_vertex_nodes(graph, next_chunk);
+                if !nodes_overlap(&start_vertex_nodes, &next_vertex_nodes) {
+                    continue;
+                }
+
+                let next_distance = distance + 1;
+                let neighbor_type = classify_neighbor(graph, start, &start_vertex_nodes, next_chunk);
+
+                visited.insert(next_chunk);
+                neighbors.push(ChunkNeighbor {
+                    chunk: next_chunk,
+                    neighbor_type,
+                    distance: next_distance,
+                });
+                queue.push_back((next_chunk, next_distance));
+            }
+        }
+
+        Self { neighbors, index: 0 }
+    }
+
+    /// Returns the total count of vertex-sharing neighbors.
+    pub fn count(&self) -> usize {
+        self.neighbors.len()
+    }
+
+    /// Returns all neighbors as a slice.
+    pub fn as_slice(&self) -> &[ChunkNeighbor] {
+        &self.neighbors
+    }
+
+    /// Returns only face-adjacent neighbors (there are always exactly 6).
+    pub fn faces(&self) -> impl Iterator<Item = &ChunkNeighbor> {
+        self.neighbors
+            .iter()
+            .filter(|n| n.neighbor_type == NeighborType::Face)
+    }
+
+    /// Returns only edge-adjacent neighbors (share edge but not face).
+    pub fn edges(&self) -> impl Iterator<Item = &ChunkNeighbor> {
+        self.neighbors
+            .iter()
+            .filter(|n| n.neighbor_type == NeighborType::Edge)
+    }
+
+    /// Returns only corner-adjacent neighbors (share only vertices).
+    pub fn corners(&self) -> impl Iterator<Item = &ChunkNeighbor> {
+        self.neighbors
+            .iter()
+            .filter(|n| n.neighbor_type == NeighborType::Corner)
+    }
+
+    /// Consume the iterator and return all neighbors grouped by type.
+    pub fn into_grouped(self) -> NeighborsByType {
+        let mut faces = Vec::new();
+        let mut edges = Vec::new();
+        let mut corners = Vec::new();
+
+        for neighbor in self.neighbors {
+            match neighbor.neighbor_type {
+                NeighborType::Face => faces.push(neighbor),
+                NeighborType::Edge => edges.push(neighbor),
+                NeighborType::Corner => corners.push(neighbor),
+            }
+        }
+
+        NeighborsByType {
+            faces,
+            edges,
+            corners,
+        }
+    }
+}
+
+impl Iterator for VertexSharingNeighbors {
+    type Item = ChunkNeighbor;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.neighbors.len() {
+            let item = self.neighbors[self.index];
+            self.index += 1;
+            Some(item)
+        } else {
+            None
+        }
+    }
+}
+
+impl ExactSizeIterator for VertexSharingNeighbors {
+    fn len(&self) -> usize {
+        self.neighbors.len() - self.index
+    }
+}
+
+/// Neighbors grouped by their adjacency type.
+#[derive(Debug, Clone)]
+pub struct NeighborsByType {
+    /// Face-adjacent neighbors (6 in any geometry).
+    pub faces: Vec<ChunkNeighbor>,
+    /// Edge-adjacent neighbors (share edge but not face).
+    pub edges: Vec<ChunkNeighbor>,
+    /// Corner-adjacent neighbors (share only vertices).
+    pub corners: Vec<ChunkNeighbor>,
+}
+
+impl NeighborsByType {
+    /// Total number of all neighbors.
+    pub fn total(&self) -> usize {
+        self.faces.len() + self.edges.len() + self.corners.len()
+    }
+
+    /// Iterate over all neighbors in order: faces, then edges, then corners.
+    pub fn iter(&self) -> impl Iterator<Item = &ChunkNeighbor> {
+        self.faces
+            .iter()
+            .chain(self.edges.iter())
+            .chain(self.corners.iter())
+    }
+}
+
+/// Returns the 6 face-adjacent chunk neighbors.
+///
+/// This is a simpler, more efficient alternative to `VertexSharingNeighbors` when
+/// you only need face neighbors. Returns `None` for any neighbor whose node
+/// doesn't exist in the graph.
+pub fn face_neighbors(graph: &Graph, chunk: ChunkId) -> [Option<ChunkId>; 6] {
+    let mut result = [None; 6];
+    for (i, dir) in ChunkDirection::iter().enumerate() {
+        result[i] = graph.get_chunk_neighbor(chunk, dir.axis, dir.sign);
+    }
+    result
+}
+
+/// Returns the 6 face-adjacent chunk neighbors, allocating nodes as needed.
+pub fn face_neighbors_ensuring(graph: &mut Graph, chunk: ChunkId) -> [ChunkId; 6] {
+    let cursor = Cursor::from_vertex(chunk.node, chunk.vertex);
+    let mut result = [chunk; 6];
+    for (i, dir) in Dir::iter().enumerate() {
+        let next = cursor.step_ensuring(graph, dir);
+        if let Some(canonical) = next.canonicalize(graph) {
+            result[i] = canonical;
+        }
+    }
+    result
+}
+
+// Helper: Check if two sets of node IDs have any overlap
+fn nodes_overlap(a: &[NodeId; 8], b: &[NodeId; 8]) -> bool {
+    a.iter().any(|n| b.iter().any(|m| *n == *m))
+}
+
+// Helper: Count how many vertices two chunks share
+fn count_shared_vertices(a_nodes: &[NodeId; 8], b_nodes: &[NodeId; 8]) -> usize {
+    a_nodes
+        .iter()
+        .filter(|n| b_nodes.iter().any(|m| *n == m))
+        .count()
+}
+
+// Helper: Classify a neighbor based on how many vertices it shares
+fn classify_neighbor(
+    graph: &mut Graph,
+    _reference: ChunkId,
+    reference_nodes: &[NodeId; 8],
+    neighbor: ChunkId,
+) -> NeighborType {
+    let neighbor_nodes = cube_vertex_nodes(graph, neighbor);
+    let shared = count_shared_vertices(reference_nodes, &neighbor_nodes);
+
+    // Face neighbors share 4 vertices (a whole face of the cube)
+    // Edge neighbors share 2 vertices (an edge of the cube)
+    // Corner neighbors share 1 vertex
+    match shared {
+        4 => NeighborType::Face,
+        2 => NeighborType::Edge,
+        1 => NeighborType::Corner,
+        _ => {
+            // 0 shouldn't happen if we filtered correctly, treat as corner
+            debug_assert!(shared > 0, "Neighbor should share at least one vertex");
+            NeighborType::Corner
+        }
     }
 }
 
@@ -447,5 +760,96 @@ mod tests {
             vertex_neighbor_voxels.get(CoordsWithMargins([6, 10, 13]).to_index(12)),
             BlockKind::Grass.id()
         );
+    }
+
+    #[test]
+    fn test_vertex_sharing_neighbors() {
+        let mut graph = Graph::new(12);
+        let chunk = ChunkId::new(NodeId::ROOT, Vertex::A);
+
+        let neighbors = VertexSharingNeighbors::new(&mut graph, chunk);
+        let count = neighbors.count();
+
+        // In hyperbolic space, a chunk shares vertices with 110 other chunks
+        assert_eq!(count, 110, "Expected 110 vertex-sharing neighbors, got {count}");
+
+        // Verify grouping works
+        let grouped = VertexSharingNeighbors::new(&mut graph, chunk).into_grouped();
+
+        // Face neighbors: always 6
+        assert_eq!(
+            grouped.faces.len(),
+            6,
+            "Expected 6 face neighbors, got {}",
+            grouped.faces.len()
+        );
+
+        // All face neighbors should have distance 1
+        for face in &grouped.faces {
+            assert_eq!(face.distance, 1, "Face neighbor should have distance 1");
+            assert_eq!(face.neighbor_type, NeighborType::Face);
+        }
+
+        // All edge neighbors should have distance >= 2
+        for edge in &grouped.edges {
+            assert!(edge.distance >= 1, "Edge neighbor distance should be >= 1");
+            assert_eq!(edge.neighbor_type, NeighborType::Edge);
+        }
+
+        // All corner neighbors should share only vertices
+        for corner in &grouped.corners {
+            assert_eq!(corner.neighbor_type, NeighborType::Corner);
+        }
+
+        // Total should be 110
+        assert_eq!(
+            grouped.total(),
+            110,
+            "Grouped total should be 110, got {}",
+            grouped.total()
+        );
+
+        eprintln!(
+            "Neighbor breakdown: {} faces, {} edges, {} corners = {} total",
+            grouped.faces.len(),
+            grouped.edges.len(),
+            grouped.corners.len(),
+            grouped.total()
+        );
+    }
+
+    #[test]
+    fn test_face_neighbors() {
+        let mut graph = Graph::new(12);
+        let chunk = ChunkId::new(NodeId::ROOT, Vertex::A);
+
+        // First test without ensuring - some may be None if nodes don't exist
+        let neighbors_optional = face_neighbors(&graph, chunk);
+
+        // With ensuring, all 6 should exist
+        let neighbors = face_neighbors_ensuring(&mut graph, chunk);
+
+        // All 6 should be different from the original chunk
+        for neighbor in &neighbors {
+            assert_ne!(*neighbor, chunk, "Face neighbor should not be the same chunk");
+        }
+
+        // All 6 should be distinct
+        let unique: std::collections::HashSet<_> = neighbors.iter().collect();
+        assert_eq!(unique.len(), 6, "Should have 6 unique face neighbors");
+    }
+
+    #[test]
+    fn test_cube_vertex_nodes() {
+        let mut graph = Graph::new(12);
+        let chunk = ChunkId::new(NodeId::ROOT, Vertex::A);
+
+        let vertex_nodes = cube_vertex_nodes(&mut graph, chunk);
+
+        // Should have 8 nodes (corners of the dual cube)
+        assert_eq!(vertex_nodes.len(), 8);
+
+        // First vertex should be the chunk's own node (0 steps to reach)
+        assert_eq!(vertex_nodes[0], chunk.node);
     }
 }

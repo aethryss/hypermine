@@ -56,6 +56,50 @@ impl Cursor {
             Vertex::from_sides([self.a, self.b, self.c]).unwrap(),
         ))
     }
+
+    /// Returns the node of this cursor.
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    /// Returns the first side of this cursor.
+    pub fn a(&self) -> Side {
+        self.a
+    }
+
+    /// Returns the second side of this cursor.
+    pub fn b(&self) -> Side {
+        self.b
+    }
+
+    /// Returns the third side of this cursor.
+    pub fn c(&self) -> Side {
+        self.c
+    }
+
+    /// Get the neighbor towards `dir`, allocating the neighbor node if needed.
+    pub fn step_ensuring(self, graph: &mut Graph, dir: Dir) -> Self {
+        let (a, b, c) = (self.a, self.b, self.c);
+        let a_prime = NEIGHBORS[a as usize][b as usize][c as usize].unwrap();
+        let b_prime = NEIGHBORS[b as usize][a as usize][c as usize].unwrap();
+        let c_prime = NEIGHBORS[c as usize][b as usize][a as usize].unwrap();
+        use Dir::*;
+        let (sides, neighbor) = match dir {
+            Left => ((a, b, c_prime), c),
+            Right => ((a, b, c_prime), c_prime),
+            Down => ((a, b_prime, c), b),
+            Up => ((a, b_prime, c), b_prime),
+            Forward => ((a_prime, b, c), a),
+            Back => ((a_prime, b, c), a_prime),
+        };
+        let node = graph.ensure_neighbor(self.node, neighbor);
+        Self {
+            node,
+            a: sides.0,
+            b: sides.1,
+            c: sides.2,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
