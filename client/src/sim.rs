@@ -13,6 +13,7 @@ use common::{
     collision_math::Ray,
     graph::{Graph, NodeId},
     graph_ray_casting,
+    light_propagation::{self, LightUpdateQueue},
     math::{MDirection, MIsometry, MPoint},
     node::VoxelData,
     proto::{
@@ -41,6 +42,8 @@ pub struct Sim {
     pub graph: Graph,
     /// Drives chunk generation
     worldgen_driver: WorldgenDriver,
+    /// Light update queue for propagation
+    light_queue: LightUpdateQueue,
     pub graph_entities: GraphEntities,
     entity_ids: FxHashMap<EntityId, Entity>,
     pub world: hecs::World,
@@ -97,6 +100,7 @@ impl Sim {
                 worldgen_preset,
                 cfg.world_seed,
             ),
+            light_queue: LightUpdateQueue::new(),
             graph_entities: GraphEntities::new(),
             entity_ids: FxHashMap::default(),
             world: hecs::World::new(),
@@ -228,7 +232,11 @@ impl Sim {
             self.view(),
             self.cfg.chunk_generation_distance,
             &mut self.graph,
+            &mut self.light_queue,
         );
+
+        // Propagate light each tick
+        light_propagation::propagate_light_tick(&mut self.graph, &mut self.light_queue);
 
         let step_interval = self.cfg.step_interval;
         self.since_input_sent += dt;
@@ -390,7 +398,7 @@ impl Sim {
         }
         for block_update in msg.block_updates.into_iter() {
             self.worldgen_driver
-                .apply_block_update(&mut self.graph, block_update);
+                .apply_block_update(&mut self.graph, block_update, &mut self.light_queue);
         }
         for (chunk_id, voxel_data) in msg.voxel_data {
             let Some(voxel_data) = VoxelData::deserialize(&voxel_data, self.cfg.chunk_size) else {
@@ -398,7 +406,7 @@ impl Sim {
                 continue;
             };
             self.worldgen_driver
-                .apply_voxel_data(&mut self.graph, chunk_id, voxel_data);
+                .apply_voxel_data(&mut self.graph, chunk_id, voxel_data, &mut self.light_queue);
         }
         for (subject, new_entity) in msg.inventory_additions {
             self.world

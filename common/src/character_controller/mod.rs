@@ -28,13 +28,19 @@ pub fn run_character_step(
     input: &CharacterInput,
     dt_seconds: f32,
 ) {
+    // Get the up direction; if the node state isn't ready yet, skip this step
+    let Some(up) = graph.get_relative_up(position) else {
+        // Node not yet populated, can't run character physics
+        return;
+    };
+
     let ctx = CharacterControllerContext {
         cfg: &sim_config.character,
         collision_context: CollisionContext {
             graph,
             radius: sim_config.character.character_radius,
         },
-        up: graph.get_relative_up(position).unwrap(),
+        up,
         dt_seconds,
         movement_input: sanitize_motion_input(input.movement),
         jump_input: input.jump,

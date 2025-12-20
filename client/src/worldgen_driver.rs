@@ -3,6 +3,7 @@ use std::time::Instant;
 use common::{
     dodeca::{self, Vertex},
     graph::{Graph, NodeId},
+    light_propagation::{self, LightUpdateQueue},
     math::MPoint,
     node::{Chunk, ChunkId, VoxelData},
     proto::{BlockUpdate, Position},
@@ -34,12 +35,18 @@ impl WorldgenDriver {
         }
     }
 
-    pub fn drive(&mut self, view: Position, chunk_generation_distance: f32, graph: &mut Graph) {
+    pub fn drive(
+        &mut self,
+        view: Position,
+        chunk_generation_distance: f32,
+        graph: &mut Graph,
+        light_queue: &mut LightUpdateQueue,
+    ) {
         let drive_worldgen_started = Instant::now();
 
         // Check for chunks that have finished generating
         while let Some(chunk) = self.work_queue.poll() {
-            self.add_chunk_to_graph(graph, ChunkId::new(chunk.node, chunk.chunk), chunk.voxels);
+            self.add_chunk_to_graph(graph, ChunkId::new(chunk.node, chunk.chunk), chunk.voxels, light_queue);
         }
 
         if !graph.contains(view.node) {
@@ -73,7 +80,7 @@ impl WorldgenDriver {
                 let params =
                     common::worldgen::ChunkParams::new(graph, chunk_id, self.preset, self.seed);
                 if let Some(voxel_data) = self.preloaded_voxel_data.remove(&chunk_id) {
-                    self.add_chunk_to_graph(graph, chunk_id, voxel_data);
+                    self.add_chunk_to_graph(graph, chunk_id, voxel_data, light_queue);
                 } else if self.work_queue.load(ChunkDesc { node, params }) {
                     graph[chunk_id] = Chunk::Generating;
                 } else {
@@ -92,8 +99,17 @@ impl WorldgenDriver {
         graph: &mut Graph,
         chunk_id: ChunkId,
         voxel_data: VoxelData,
+        light_queue: &mut LightUpdateQueue,
     ) {
         graph.populate_chunk(chunk_id, voxel_data);
+        
+        // Initialize light from emitting blocks in this chunk
+        light_propagation::initialize_chunk_light(graph, chunk_id);
+        
+        // Mark chunk for light propagation if it has emitters
+        if let common::node::Chunk::Populated { light_dirty: true, .. } = &graph[chunk_id] {
+            light_queue.mark_dirty(chunk_id);
+        }
 
         if let Some(block_updates) = self.preloaded_block_updates.remove(&chunk_id) {
             for block_update in block_updates {
@@ -103,8 +119,15 @@ impl WorldgenDriver {
         }
     }
 
-    pub fn apply_block_update(&mut self, graph: &mut Graph, block_update: BlockUpdate) {
+    pub fn apply_block_update(
+        &mut self,
+        graph: &mut Graph,
+        block_update: BlockUpdate,
+        light_queue: &mut LightUpdateQueue,
+    ) {
         if graph.update_block(&block_update) {
+            // Block was placed in an existing chunk - mark for light update
+            light_queue.mark_dirty(block_update.chunk_id);
             return;
         }
         self.preloaded_block_updates
@@ -118,9 +141,10 @@ impl WorldgenDriver {
         graph: &mut Graph,
         chunk_id: ChunkId,
         voxel_data: VoxelData,
+        light_queue: &mut LightUpdateQueue,
     ) {
         if graph.contains(chunk_id.node) {
-            self.add_chunk_to_graph(graph, chunk_id, voxel_data);
+            self.add_chunk_to_graph(graph, chunk_id, voxel_data, light_queue);
         } else {
             self.preloaded_voxel_data.insert(chunk_id, voxel_data);
         }

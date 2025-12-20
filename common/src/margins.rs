@@ -6,6 +6,7 @@ use crate::{
     cursor::{Cursor, Dir},
     dodeca::Vertex,
     graph::{Graph, NodeId},
+    light::LightData,
     math::PermuteXYZ,
     node::{Chunk, ChunkId, VoxelData},
     voxel_math::{ChunkAxisPermutation, ChunkDirection, CoordAxis, CoordSign, Coords},
@@ -80,6 +81,51 @@ pub fn fix_margins(
             neighbor_voxel_data
                 [(neighbor_axis_permutation * coords_of_margin_voxel).to_index(dimension)] =
                 voxel_data[coords_of_boundary_voxel.to_index(dimension)];
+        }
+    }
+}
+
+/// Updates the light margins of both `light` and `neighbor_light` at the side they meet at.
+/// This is analogous to `fix_margins` but for light data instead of voxel data.
+///
+/// It is assumed that `light` corresponds to a chunk that lies at `vertex` and that
+/// `neighbor_light` is at direction `direction` from `light`.
+pub fn fix_light_margins(
+    dimension: u8,
+    vertex: Vertex,
+    light: &mut LightData,
+    direction: ChunkDirection,
+    neighbor_light: &mut LightData,
+) {
+    let neighbor_axis_permutation = neighbor_axis_permutation(vertex, direction);
+
+    let margin_coord = CoordsWithMargins::margin_coord(dimension, direction.sign);
+    let boundary_coord = CoordsWithMargins::boundary_coord(dimension, direction.sign);
+
+    // Get mutable access to both light data arrays
+    let light_data = light.data_mut(dimension);
+    let neighbor_light_data = neighbor_light.data_mut(dimension);
+
+    // Synchronize light values at the shared face
+    for j in 0..dimension {
+        for i in 0..dimension {
+            // Determine coordinates of the boundary voxel (to read from) and the margin voxel (to write to)
+            // in light_data's perspective. To convert to neighbor_light_data's perspective, left-multiply
+            // by neighbor_axis_permutation.
+            let coords_of_boundary_voxel = CoordsWithMargins(
+                [boundary_coord, i + 1, j + 1].tuv_to_xyz(direction.axis as usize),
+            );
+            let coords_of_margin_voxel =
+                CoordsWithMargins([margin_coord, i + 1, j + 1].tuv_to_xyz(direction.axis as usize));
+
+            // Use neighbor_light_data to set margins of light_data
+            light_data[coords_of_margin_voxel.to_index(dimension)] = neighbor_light_data
+                [(neighbor_axis_permutation * coords_of_boundary_voxel).to_index(dimension)];
+
+            // Use light_data to set margins of neighbor_light_data
+            neighbor_light_data
+                [(neighbor_axis_permutation * coords_of_margin_voxel).to_index(dimension)] =
+                light_data[coords_of_boundary_voxel.to_index(dimension)];
         }
     }
 }
@@ -190,6 +236,7 @@ pub fn reconcile_margin_voxels(
         voxels: neighbor_voxels,
         surface: neighbor_surface,
         old_surface: neighbor_old_surface,
+        ..
     } = &mut graph[neighbor_chunk]
     else {
         unreachable!();
@@ -210,6 +257,7 @@ pub fn reconcile_margin_voxels(
         voxels,
         surface,
         old_surface,
+        ..
     } = &mut graph[chunk]
     else {
         unreachable!();
@@ -686,6 +734,8 @@ mod tests {
         for chunk in [current_chunk, node_neighbor_chunk, vertex_neighbor_chunk] {
             graph[chunk] = Chunk::Populated {
                 voxels: VoxelData::Solid(BlockKind::Air.id()),
+                light: crate::light::LightData::default(),
+                light_dirty: false,
                 surface: None,
                 old_surface: None,
             };

@@ -32,6 +32,12 @@ layout(set = 1, binding = 0) readonly restrict buffer Voxels {
     uint voxel_pair[];
 };
 
+// Light data buffer - same layout as voxels (16-bit values packed in pairs)
+// Each light value is 12-bit RGB (4 bits per channel) in lower 12 bits
+layout(set = 1, binding = 8) readonly restrict buffer LightData {
+    uint light_pair[];
+};
+
 // Face counts for each transparency class
 layout(set = 1, binding = 1) restrict buffer State {
     uint opaque_face_count;
@@ -89,6 +95,14 @@ uint get_voxel(ivec3 coords) {
     return (linear % 2) == 0 ? pair & 0xFFFF : pair >> 16;
 }
 
+// Get light value at given coordinates (returns 12-bit RGB: [11:8]=R, [7:4]=G, [3:0]=B)
+uint get_light(ivec3 coords) {
+    // Same indexing as voxels, with margin handling
+    uint linear = (coords.x + 1) + (coords.y + 1) * (dimension + 2) + (coords.z + 1) * (dimension + 2) * (dimension + 2);
+    uint pair = light_pair[linear / 2];
+    return ((linear % 2) == 0 ? pair & 0xFFFF : pair >> 16) & 0x0FFF;
+}
+
 // A face between a voxel and its neighbor in the -X, -Y, or -Z direction
 struct Face {
     // coordinates of the voxel
@@ -101,6 +115,8 @@ struct Face {
     uint material;
     // transparency class of the face (0=opaque, 1=cutout, 2=translucent)
     uint trans_class;
+    // light value at the air side of this face (12-bit RGB)
+    uint light;
 };
 
 // Result of examining a boundary - may produce 0, 1, or 2 faces
@@ -162,6 +178,8 @@ FaceResult find_faces() {
         result.face1.inward = false;  // normal points outward from self toward neighbor
         result.face1.material = texture_index[self_mat];
         result.face1.trans_class = self_class;
+        // Light comes from neighbor side (where the face is visible from)
+        result.face1.light = get_light(neighbor);
         
         // Face 2: neighbor's face (facing toward self, normal pointing into self)
         result.has_face2 = true;
@@ -170,6 +188,8 @@ FaceResult find_faces() {
         result.face2.inward = true;   // normal points inward from neighbor toward self
         result.face2.material = texture_index[neighbor_mat];
         result.face2.trans_class = neighbor_class;
+        // Light comes from self side (where the face is visible from)
+        result.face2.light = get_light(voxel);
         
         return result;
     }
@@ -184,6 +204,8 @@ FaceResult find_faces() {
     uint block_id = (self_mat != 0) ? self_mat : neighbor_mat;
     result.face1.material = texture_index[block_id];
     result.face1.trans_class = get_transparency_class(block_id);
+    // Light comes from the air side of the face
+    result.face1.light = (self_mat == 0) ? get_light(voxel) : get_light(neighbor);
     
     return result;
 }
@@ -303,7 +325,8 @@ void main() {
             face.axis, \
             face.inward ^^ reverse_winding, \
             face.material, \
-            surface_occlusion(face.voxel, face.axis, face.inward, face.trans_class) \
+            surface_occlusion(face.voxel, face.axis, face.inward, face.trans_class), \
+            face.light \
         ); \
         if (face.trans_class == TRANSPARENCY_OPAQUE) { \
             surfaces_opaque[opaque_offset + my_opaque_offset] = s; \

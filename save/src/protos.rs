@@ -35,6 +35,11 @@ pub struct Chunk {
     /// Dense 3D array of 16-bit material tags for all voxels in this chunk
     #[prost(bytes = "vec", tag = "2")]
     pub voxels: ::prost::alloc::vec::Vec<u8>,
+    /// Dense 3D array of 16-bit light values (4 bits per RGB channel) for all voxels.
+    /// Optional - if empty, the chunk has no persistent light data.
+    /// Format: dimension^3 * 2 bytes (little-endian u16 per voxel)
+    #[prost(bytes = "vec", tag = "3")]
+    pub light: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

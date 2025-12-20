@@ -13,6 +13,9 @@ struct Surface {
     // From most to least significant byte, (occlusion, <padding>, texture_index, texture_index)
     // Now stores texture_index (0-255) instead of material
     uint occlusion_mat;
+    // Block light color: bits [11:8] = R, [7:4] = G, [3:0] = B (4 bits per channel)
+    // Upper 16 bits reserved for future use
+    uint light;
 };
 
 // [0,2^8)^3
@@ -40,13 +43,27 @@ float get_occlusion(Surface s, uvec2 texcoords) {
     return float((s.occlusion_mat >> (24 + 2 * (texcoords.x | texcoords.y << 1))) & 0x03) / 3.0 * 0.95 + 0.05;
 }
 
-Surface surface(uvec3 pos, uint axis, bool reverse, uint mat, uvec4 occlusion) {
+// Extract light color as vec3 (each channel 0.0 to 1.0)
+vec3 get_light_color(Surface s) {
+    float r = float((s.light >> 8) & 0x0Fu) / 15.0;
+    float g = float((s.light >> 4) & 0x0Fu) / 15.0;
+    float b = float(s.light & 0x0Fu) / 15.0;
+    return vec3(r, g, b);
+}
+
+// Get raw light value (12 bits: 4 bits per RGB channel)
+uint get_light_raw(Surface s) {
+    return s.light & 0x0FFFu;
+}
+
+Surface surface(uvec3 pos, uint axis, bool reverse, uint mat, uvec4 occlusion, uint light) {
     Surface result;
     // Flip the quad if necessary to prevent the triangle dividing line from being parallel to the
     // gradient of ambient occlusion, ensuring isotropy.
     axis += 3 * uint(reverse) + 6 * uint(occlusion.y + occlusion.z > occlusion.x + occlusion.w);
     result.pos_axis = pos.x | pos.y << 8 | pos.z << 16 | axis << 24;
     result.occlusion_mat = mat | occlusion.x << 24 | occlusion.y << 26 | occlusion.z << 28 | occlusion.w << 30;
+    result.light = light;
     return result;
 }
 

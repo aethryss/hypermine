@@ -9,6 +9,7 @@ layout(location = 0) in mat4 transform;
 layout(location = 0) out vec3 texcoords_out;
 layout(location = 1) out float occlusion;
 layout(location = 2) out flat uint texture_index_out;
+layout(location = 3) out vec3 light_color;
 
 layout(set = 1, binding = 0) readonly restrict buffer Surfaces {
     Surface surfaces[];
@@ -59,6 +60,7 @@ void main()  {
     texcoords_out = vec3(uv, 0);  // Store UV coordinates, z is unused
     texture_index_out = get_mat(s);  // Pass texture_index directly (0-255)
     occlusion = get_occlusion(s, uv);
+    light_color = get_light_color(s);  // Get the block light color
     vec3 relative_coords = vertices[axis][vertex] + pos;
     gl_Position = view_projection * transform * vec4(relative_coords / dimension, 1);
 }

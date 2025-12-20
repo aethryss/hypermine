@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use common::dodeca::{Side, Vertex};
+use common::light::LightData;
+use common::light_propagation::{self, LightUpdateQueue};
 use common::math::MIsometry;
 use common::node::VoxelData;
 use common::proto::{BlockUpdate, Inventory, SerializedVoxelData};
@@ -35,8 +37,8 @@ pub struct Sim {
     entity_ids: FxHashMap<EntityId, Entity>,
     world: hecs::World,
     graph: Graph,
-    /// Voxel data that has been fetched from a savefile but not yet introduced to the graph
-    preloaded_voxel_data: FxHashMap<ChunkId, VoxelData>,
+    /// Voxel and light data that has been fetched from a savefile but not yet introduced to the graph
+    preloaded_chunk_data: FxHashMap<ChunkId, PreloadedChunkData>,
     accumulated_changes: AccumulatedChanges,
     graph_entities: GraphEntities,
     /// All nodes that have entity-related information yet to be saved
@@ -44,8 +46,16 @@ pub struct Sim {
     /// All nodes that have voxel-related information yet to be saved
     dirty_voxel_nodes: FxHashSet<NodeId>,
     /// All chunks in the graph have ever had any block updates applied to them and can no longer be regenerated with worldgen.
-    /// This doesn't include chunks that have not been added to the graph yet (See `preloaded_voxel_data`).
+    /// This doesn't include chunks that have not been added to the graph yet (See `preloaded_chunk_data`).
     modified_chunks: FxHashSet<ChunkId>,
+    /// Queue for tracking light propagation updates
+    light_queue: LightUpdateQueue,
+}
+
+/// Chunk data loaded from a save file, not yet inserted into the graph.
+struct PreloadedChunkData {
+    voxels: VoxelData,
+    light: LightData,
 }
 
 impl Sim {
@@ -56,12 +66,13 @@ impl Sim {
             entity_ids: FxHashMap::default(),
             world: hecs::World::new(),
             graph: Graph::new(cfg.chunk_size),
-            preloaded_voxel_data: FxHashMap::default(),
+            preloaded_chunk_data: FxHashMap::default(),
             accumulated_changes: AccumulatedChanges::default(),
             graph_entities: GraphEntities::new(),
             dirty_nodes: FxHashSet::default(),
             dirty_voxel_nodes: FxHashSet::default(),
             modified_chunks: FxHashSet::default(),
+            light_queue: LightUpdateQueue::new(),
             cfg,
         };
 
@@ -245,10 +256,22 @@ impl Sim {
                 let vertex = Vertex::iter()
                     .nth(chunk.vertex as usize)
                     .context("deserializing vertex ID")?;
-                self.preloaded_voxel_data.insert(
+                
+                // Deserialize light data if present, otherwise use default (no light)
+                let light = if chunk.light.is_empty() {
+                    LightData::default()
+                } else {
+                    LightData::deserialize(&chunk.light, self.cfg.chunk_size)
+                        .unwrap_or_default()
+                };
+                
+                self.preloaded_chunk_data.insert(
                     ChunkId::new(self.graph.from_hash(node_hash), vertex),
-                    VoxelData::deserialize(&voxels, self.cfg.chunk_size)
-                        .context("deserializing voxel data")?,
+                    PreloadedChunkData {
+                        voxels: VoxelData::deserialize(&voxels, self.cfg.chunk_size)
+                            .context("deserializing voxel data")?,
+                        light,
+                    },
                 );
             }
         }
@@ -318,12 +341,13 @@ impl Sim {
             if !self.modified_chunks.contains(&ChunkId::new(node, vertex)) {
                 continue;
             }
-            let Chunk::Populated { ref voxels, .. } = node_data.chunks[vertex] else {
+            let Chunk::Populated { ref voxels, ref light, .. } = node_data.chunks[vertex] else {
                 panic!("Unknown chunk listed as modified");
             };
             chunks.push(save::Chunk {
                 vertex: vertex as u32,
                 voxels: voxels.serialize(self.cfg.chunk_size).inner,
+                light: light.serialize(self.cfg.chunk_size),
             })
         }
         save::VoxelNode { chunks }
@@ -473,10 +497,10 @@ impl Sim {
                 .voxel_data
                 .push((chunk_id, voxels.serialize(self.cfg.chunk_size)));
         }
-        for (&chunk_id, voxels) in self.preloaded_voxel_data.iter() {
+        for (&chunk_id, chunk_data) in self.preloaded_chunk_data.iter() {
             spawns
                 .voxel_data
-                .push((chunk_id, voxels.serialize(self.cfg.chunk_size)));
+                .push((chunk_id, chunk_data.voxels.serialize(self.cfg.chunk_size)));
         }
         spawns
     }
@@ -504,9 +528,17 @@ impl Sim {
                     if !matches!(self.graph[chunk], Chunk::Fresh) {
                         continue;
                     }
-                    if let Some(voxel_data) = self.preloaded_voxel_data.remove(&chunk) {
+                    if let Some(chunk_data) = self.preloaded_chunk_data.remove(&chunk) {
                         self.modified_chunks.insert(chunk);
-                        self.graph.populate_chunk(chunk, voxel_data);
+                        // Populate chunk, then set light data from save
+                        self.graph.populate_chunk(chunk, chunk_data.voxels);
+                        // Set the light data from the save file
+                        if let Chunk::Populated { ref mut light, ref mut light_dirty, .. } = self.graph[chunk] {
+                            *light = chunk_data.light;
+                            *light_dirty = false; // Light was loaded from save, no need to recalculate
+                        }
+                        // Still mark for light updates to propagate to neighbors
+                        self.light_queue.mark_dirty(chunk);
                     } else {
                         let params = ChunkParams::new(
                             &mut self.graph,
@@ -515,6 +547,9 @@ impl Sim {
                             self.cfg.world_seed,
                         );
                         self.graph.populate_chunk(chunk, params.generate_voxels());
+                        // Initialize light for this new chunk and mark for propagation
+                        light_propagation::initialize_chunk_light(&mut self.graph, chunk);
+                        self.light_queue.mark_dirty(chunk);
                     }
                 }
             }
@@ -528,6 +563,9 @@ impl Sim {
             .query::<(&NodeId, &mut Position, &mut Character, &CharacterInput)>()
             .iter()
         {
+            // Ensure node state is set for character physics
+            self.graph.ensure_node_state(position.node);
+            
             character_controller::run_character_step(
                 &self.cfg,
                 &self.graph,
@@ -547,6 +585,11 @@ impl Sim {
             let id = *self.world.get::<&EntityId>(entity).unwrap();
             self.attempt_block_update(id, block_update);
         }
+
+        // Propagate block lighting
+        // This runs light updates for all populated chunks, spreading light from emitters
+        // and updating dirty chunks. Light propagates one block per tick.
+        self.propagate_lighting();
 
         self.update_entity_node_ids();
 
@@ -706,10 +749,27 @@ impl Sim {
                 self.add_to_inventory(subject, produced_entity);
             }
         }
+        // Mark chunk for light update since a block changed (could be an emitter)
+        self.light_queue.mark_dirty(block_update.chunk_id);
+
         assert!(self.graph.update_block(&block_update));
         self.modified_chunks.insert(block_update.chunk_id);
         self.dirty_voxel_nodes.insert(block_update.chunk_id.node);
         self.accumulated_changes.block_updates.push(block_update);
+    }
+
+    /// Propagate block lighting through the world.
+    ///
+    /// This runs a tick of light propagation for all chunks that have pending updates.
+    /// Light propagates one block per tick from emitters and decays based on block type.
+    fn propagate_lighting(&mut self) {
+        // Run a tick of light propagation
+        let result = light_propagation::propagate_light_tick(&mut self.graph, &mut self.light_queue);
+
+        // Log if any chunks were updated (for debugging)
+        if !result.dirty_chunks.is_empty() {
+            trace!(count = result.dirty_chunks.len(), "light propagation updated chunks");
+        }
     }
 }
 

@@ -127,6 +127,8 @@ impl Voxels {
                     ref mut surface,
                     ref mut old_surface,
                     ref voxels,
+                    ref light,
+                    ref mut light_dirty,
                 } = &mut sim.graph[chunk]
                 else {
                     continue;
@@ -140,7 +142,11 @@ impl Voxels {
                     frame.surface.transforms_mut()[slot.0 as usize] =
                         na::Matrix4::from(*node_transform) * vertex.chunk_to_node();
                 }
-                if let (None, &VoxelData::Dense(ref data)) = (&surface, voxels) {
+                
+                // Check if we need to extract: either no surface, or light changed
+                let needs_extraction = surface.is_none() || *light_dirty;
+                
+                if let (true, &VoxelData::Dense(ref data)) = (needs_extraction, voxels) {
                     // Extract a surface so it can be drawn in future frames
                     if frame.extracted.len() == self.config.chunk_load_parallelism as usize {
                         continue;
@@ -165,8 +171,23 @@ impl Voxels {
                         refcount: 0,
                     });
                     *surface = Some(slot);
+                    *light_dirty = false;  // Mark light as processed
                     let storage = self.extraction_scratch.storage(scratch_slot);
                     storage.copy_from_slice(&data[..]);
+                    // Copy light data to GPU staging buffer
+                    let light_storage = self.extraction_scratch.light_storage(scratch_slot);
+                    match light {
+                        common::light::LightData::Uniform(value) => {
+                            // Fill entire storage with the same light value
+                            light_storage.fill(value.to_u16());
+                        }
+                        common::light::LightData::Dense(light_data) => {
+                            // Copy dense light data
+                            for (dst, src) in light_storage.iter_mut().zip(light_data.iter()) {
+                                *dst = src.to_u16();
+                            }
+                        }
+                    }
                     if let Some((lru_slot, lru)) = removed
                         && let Populated {
                             ref mut surface,

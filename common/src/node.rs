@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::collision_math::Ray;
 use crate::dodeca::Vertex;
 use crate::graph::{Graph, NodeId};
+use crate::light::LightData;
 use crate::lru_slab::SlotId;
 use crate::proto::{BlockUpdate, Position, SerializedVoxelData};
 use crate::voxel_math::{ChunkDirection, CoordAxis, CoordSign, Coords};
@@ -127,6 +128,7 @@ impl Graph {
                 voxels: neighbor_voxels,
                 surface: neighbor_surface,
                 old_surface: neighbor_old_surface,
+                ..
             }) = self
                 .get_chunk_neighbor(chunk, chunk_direction.axis, chunk_direction.sign)
                 .map(|chunk_id| &mut self[chunk_id])
@@ -146,6 +148,8 @@ impl Graph {
         // After clearing any margins we needed to clear, we can now insert the data into the graph
         self[chunk] = Chunk::Populated {
             voxels,
+            light: LightData::default(),
+            light_dirty: true,
             surface: None,
             old_surface: None,
         };
@@ -170,8 +174,10 @@ impl Graph {
         // Update the block
         let Chunk::Populated {
             voxels,
+            light_dirty,
             surface,
             old_surface,
+            ..
         } = &mut self[block_update.chunk_id]
         else {
             return false;
@@ -182,6 +188,7 @@ impl Graph {
             .expect("coords are in-bounds");
 
         *voxel = block_update.new_tile_id;
+        *light_dirty = true; // Block change affects lighting
         *old_surface = surface.take().or(*old_surface);
 
         for chunk_direction in ChunkDirection::iter() {
@@ -246,6 +253,14 @@ pub enum Chunk {
     Populated {
         /// The voxels present in the chunk
         voxels: VoxelData,
+
+        /// Block lighting data for this chunk.
+        /// Includes margins for cross-chunk light sampling during rendering.
+        /// Initially set to default (no light), populated by the light propagation system.
+        light: LightData,
+
+        /// Whether the light data has changed and the surface needs re-extraction.
+        light_dirty: bool,
 
         /// A reference to the "mesh" used to render the chunk. Set to `None` if
         /// this mesh needs to be computed or recomputed.

@@ -22,6 +22,8 @@ pub mod graph_collision;
 mod graph_entities;
 pub mod graph_ray_casting;
 pub mod hyper_noise;
+pub mod light;
+pub mod light_propagation;
 pub mod lru_slab;
 mod margins;
 pub mod math;

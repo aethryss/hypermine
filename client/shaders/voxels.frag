@@ -3,6 +3,7 @@
 layout(location = 0) in vec3 texcoords;
 layout(location = 1) in float occlusion;
 layout(location = 2) in flat uint texture_index;
+layout(location = 3) in vec3 light_color;
 layout(location = 0) out vec4 color;
 
 layout(set = 1, binding = 1) uniform sampler2D terrain;
@@ -12,6 +13,9 @@ layout(set = 1, binding = 1) uniform sampler2D terrain;
 // alpha_cutoff: threshold for discarding (default 0.5)
 layout(constant_id = 0) const bool enable_alpha_test = false;
 layout(constant_id = 1) const float alpha_cutoff = 0.5;
+
+// Minimum ambient light level (prevents completely dark areas)
+const float AMBIENT_LIGHT = 0.1;
 
 void main() {
     // texcoords.xy are normalized [0,1] face coordinates
@@ -40,7 +44,16 @@ void main() {
         discard;
     }
     
-    // Apply occlusion/ambient lighting
+    // Calculate effective light: combine block light with ambient
+    // Block light color is [0,1] per channel from 4-bit values
+    // Add ambient to ensure areas are never completely dark
+    vec3 effective_light = max(light_color, vec3(AMBIENT_LIGHT));
+    
+    // Apply lighting and occlusion
+    // effective_light provides the light color/intensity
+    // occlusion provides corner darkening for ambient occlusion effect
+    vec3 lit_color = texColor.rgb * effective_light * occlusion;
+    
     // The blend equation for translucent uses SRC_ALPHA to blend colors,
     // so we output texColor.a as the alpha (which controls color blending)
     // but then the alpha blend overwrites with 1.0 for the fog pass
@@ -48,5 +61,5 @@ void main() {
     // For all pipelines, output texColor.a - the blend state handles the rest:
     // - Opaque/Cutout: blend disabled, just writes RGBA (alpha will be 1.0 for opaque textures)
     // - Translucent: blends RGB using SRC_ALPHA, overwrites A with 1.0
-    color = vec4(texColor.rgb * occlusion, texColor.a);
+    color = vec4(lit_color, texColor.a);
 }

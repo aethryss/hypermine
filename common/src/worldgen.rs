@@ -666,7 +666,13 @@ impl ChunkParams {
             }
 
             let block_id = if self.trussing_at(coords) {
-                BlockKind::WoodPlanks.id()
+                // Place a torch at the center of the truss for lighting test
+                let offset = self.dimension / 3;
+                if x == offset && y == offset && z == offset {
+                    BlockKind::Torch.id()
+                } else {
+                    BlockKind::WoodPlanks.id()
+                }
             } else {
                 BlockKind::Air.id()
             };

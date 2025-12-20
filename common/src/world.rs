@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::light::{BlockLightInfo, LightBehavior, LightValue};
+
 pub type BlockID = u16;
 
 #[repr(C)]
@@ -155,6 +157,84 @@ define_blocks! {
     InvisibleBedrock { id: 69, name: "Invisible Bedrock", texture: 0 }, // Use air/blank
 }
 
+impl BlockKind {
+    /// Returns the light properties for this block type.
+    ///
+    /// This includes both light emission (for light sources like torches, lava, glowstone)
+    /// and light behavior (how the block affects light propagation).
+    #[inline]
+    pub const fn light_info(self) -> BlockLightInfo {
+        use BlockKind::*;
+        match self {
+            // Air is fully transparent to light
+            Air => BlockLightInfo::transparent(),
+
+            // Light-emitting blocks
+            // Torch: warm yellow-orange light, level 14
+            Torch => BlockLightInfo::emitter_transparent(14, 11, 6),
+
+            // Glowstone: bright warm white light, level 15
+            Glowstone => BlockLightInfo::emitter(15, 14, 10),
+
+            // Lava: bright orange-red light, level 15
+            Lava | LavaStill => BlockLightInfo {
+                emission: LightValue::new(15, 8, 2),
+                behavior: LightBehavior::Translucent, // Lava glows through itself
+            },
+
+            // Lit furnace: dim orange glow, level 13
+            FurnaceLit => BlockLightInfo::emitter(13, 8, 3),
+
+            // Jack O'Lantern and lit pumpkin: warm light, level 15
+            JackOLantern | PumpkinLit => BlockLightInfo::emitter(15, 12, 6),
+
+            // Lit redstone ore: dim red glow, level 9
+            RedstoneOreLit => BlockLightInfo::emitter(9, 1, 1),
+
+            // Portal: purple glow, level 11
+            Portal => BlockLightInfo {
+                emission: LightValue::new(6, 2, 11),
+                behavior: LightBehavior::Translucent,
+            },
+
+            // Translucent blocks (light passes with higher decay)
+            Water | WaterStill => BlockLightInfo::translucent(),
+            Ice => BlockLightInfo::translucent(),
+            Glass => BlockLightInfo::translucent(),
+            Leaves => BlockLightInfo::translucent(),
+
+            // Cutout/transparent blocks (light passes with normal decay)
+            Sapling | Flower | Rose | BrownMushroom | RedMushroom => {
+                BlockLightInfo::transparent()
+            }
+            Ladder | Rail | Fence | Reed | Cactus => BlockLightInfo::transparent(),
+            WoodDoor | IronDoor => BlockLightInfo::transparent(), // Doors have gaps
+            Snow => BlockLightInfo::transparent(), // Snow layer
+
+            // All other solid blocks are opaque
+            _ => BlockLightInfo::opaque(),
+        }
+    }
+
+    /// Returns true if this block emits light.
+    #[inline]
+    pub const fn emits_light(self) -> bool {
+        self.light_info().emits_light()
+    }
+
+    /// Returns the light emission value for this block (zero for non-emitters).
+    #[inline]
+    pub const fn light_emission(self) -> LightValue {
+        self.light_info().emission
+    }
+
+    /// Returns the light behavior for this block.
+    #[inline]
+    pub const fn light_behavior(self) -> LightBehavior {
+        self.light_info().behavior
+    }
+}
+
 impl BlockRegistry {
     #[inline]
     pub fn get_by_id(id: BlockID) -> Option<Block> {
@@ -193,5 +273,29 @@ impl BlockRegistry {
     #[inline]
     pub fn all_kinds() -> &'static [BlockKind] {
         BLOCK_KINDS
+    }
+
+    /// Returns the light info for a block ID, defaulting to opaque for unknown blocks.
+    #[inline]
+    pub fn get_light_info(id: BlockID) -> BlockLightInfo {
+        BlockKind::from_id(id)
+            .map(|kind| kind.light_info())
+            .unwrap_or(BlockLightInfo::opaque())
+    }
+
+    /// Returns the light emission for a block ID, or zero for unknown/non-emitting blocks.
+    #[inline]
+    pub fn get_light_emission(id: BlockID) -> LightValue {
+        BlockKind::from_id(id)
+            .map(|kind| kind.light_emission())
+            .unwrap_or(LightValue::ZERO)
+    }
+
+    /// Returns the light behavior for a block ID, defaulting to opaque for unknown blocks.
+    #[inline]
+    pub fn get_light_behavior(id: BlockID) -> LightBehavior {
+        BlockKind::from_id(id)
+            .map(|kind| kind.light_behavior())
+            .unwrap_or(LightBehavior::Opaque)
     }
 }

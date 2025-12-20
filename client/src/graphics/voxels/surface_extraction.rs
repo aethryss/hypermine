@@ -112,6 +112,14 @@ impl SurfaceExtraction {
                             stage_flags: vk::ShaderStageFlags::COMPUTE,
                             ..Default::default()
                         },
+                        // Light data buffer (same format as voxels)
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 8,
+                            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            ..Default::default()
+                        },
                     ]),
                     None,
                 )
@@ -212,6 +220,10 @@ pub struct ScratchBuffer {
     state_buffer_unit: vk::DeviceSize,
     voxels_staging: DedicatedMapping<[u16]>,
     voxels: DedicatedBuffer,
+    /// Light data staging buffer (same layout as voxels)
+    light_staging: DedicatedMapping<[u16]>,
+    /// Light data GPU buffer
+    light: DedicatedBuffer,
     state: DedicatedBuffer,
     descriptor_pool: vk::DescriptorPool,
     params_ds: vk::DescriptorSet,
@@ -331,6 +343,28 @@ impl ScratchBuffer {
             );
             gfx.set_name(voxels.handle, cstr!("voxels"));
 
+            // Light data buffers (same size and layout as voxels)
+            let light_staging = DedicatedMapping::zeroed_array(
+                device,
+                &gfx.memory_properties,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                (voxels_size / mem::size_of::<u16>() as vk::DeviceSize) as usize,
+            );
+            gfx.set_name(light_staging.buffer(), cstr!("light staging"));
+
+            let light = DedicatedBuffer::new(
+                device,
+                &gfx.memory_properties,
+                &vk::BufferCreateInfo::default()
+                    .size(voxels_size)
+                    .usage(
+                        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                    )
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            );
+            gfx.set_name(light.handle, cstr!("light"));
+
             let state = DedicatedBuffer::new(
                 device,
                 &gfx.memory_properties,
@@ -356,8 +390,8 @@ impl ScratchBuffer {
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                                // Per task: voxels + state + 3 indirect + 3 faces = 8
-                                descriptor_count: 8 * concurrency,
+                                // Per task: voxels + light + state + 3 indirect + 3 faces = 9
+                                descriptor_count: 9 * concurrency,
                             },
                         ]),
                     None,
@@ -417,6 +451,8 @@ impl ScratchBuffer {
                 state_buffer_unit,
                 voxels_staging,
                 voxels,
+                light_staging,
+                light,
                 state,
                 descriptor_pool,
                 params_ds,
@@ -444,6 +480,14 @@ impl ScratchBuffer {
         let start = index as usize * (self.voxel_buffer_unit as usize / mem::size_of::<u16>());
         let length = (self.dimension + 2).pow(3) as usize;
         &mut self.voxels_staging[start..start + length]
+    }
+
+    /// Light data storage, same layout as voxel storage
+    /// Each u16 contains a 12-bit RGB light value (4 bits per channel)
+    pub fn light_storage(&mut self, index: u32) -> &mut [u16] {
+        let start = index as usize * (self.voxel_buffer_unit as usize / mem::size_of::<u16>());
+        let length = (self.dimension + 2).pow(3) as usize;
+        &mut self.light_staging[start..start + length]
     }
 
     pub unsafe fn extract(
@@ -609,6 +653,16 @@ impl ScratchBuffer {
                                 offset: task.face_offsets[2],
                                 range: max_faces as vk::DeviceSize * FACE_SIZE,
                             }]),
+                        // Light data buffer (binding 8)
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(self.descriptor_sets[index])
+                            .dst_binding(8)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&[vk::DescriptorBufferInfo {
+                                buffer: self.light.handle,
+                                offset: voxels_offset, // Same offset as voxels
+                                range: voxels_range,
+                            }]),
                     ],
                     &[],
                 );
@@ -617,6 +671,17 @@ impl ScratchBuffer {
                     cmd,
                     self.voxels_staging.buffer(),
                     self.voxels.handle,
+                    &[vk::BufferCopy {
+                        src_offset: voxels_offset,
+                        dst_offset: voxels_offset,
+                        size: voxels_range,
+                    }],
+                );
+                // Copy light data to GPU
+                device.cmd_copy_buffer(
+                    cmd,
+                    self.light_staging.buffer(),
+                    self.light.handle,
                     &[vk::BufferCopy {
                         src_offset: voxels_offset,
                         dst_offset: voxels_offset,
@@ -701,6 +766,8 @@ impl ScratchBuffer {
             self.transparency_classes.destroy(device);
             self.voxels_staging.destroy(device);
             self.voxels.destroy(device);
+            self.light_staging.destroy(device);
+            self.light.destroy(device);
             self.state.destroy(device);
         }
     }
@@ -873,7 +940,8 @@ impl DrawBuffer {
 // Size of the VkDrawIndirectCommand struct
 const INDIRECT_SIZE: vk::DeviceSize = 16;
 
-const FACE_SIZE: vk::DeviceSize = 8;
+// Size of a Surface struct: 3 uint32 fields (pos_axis, occlusion_mat, light) = 12 bytes
+const FACE_SIZE: vk::DeviceSize = 12;
 
 const WORKGROUP_SIZE: [u32; 3] = [4, 4, 4];
 
