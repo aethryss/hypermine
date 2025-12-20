@@ -14,8 +14,17 @@ layout(set = 1, binding = 1) uniform sampler2D terrain;
 layout(constant_id = 0) const bool enable_alpha_test = false;
 layout(constant_id = 1) const float alpha_cutoff = 0.5;
 
-// Minimum ambient light level (prevents completely dark areas)
-const float AMBIENT_LIGHT = 0.1;
+// Minimum ambient light color (prevents completely dark areas).
+//
+// Note: the render targets and textures are sRGB, so shader math happens in *linear* space.
+// If you want the on-screen (sRGB) “no light” multiplier to look like `#2d2c2f`, you must
+// use the linear-space equivalent here.
+//
+// #2d2c2f (sRGB 8-bit) -> linear (IEC 61966-2-1):
+//   r=45 -> 0.026241222
+//   g=44 -> 0.025186860
+//   b=47 -> 0.028426040
+const vec3 AMBIENT_LIGHT_COLOR = vec3(0.026241222, 0.025186860, 0.028426040);
 
 void main() {
     // texcoords.xy are normalized [0,1] face coordinates
@@ -47,7 +56,7 @@ void main() {
     // Calculate effective light: combine block light with ambient
     // Block light color is [0,1] per channel from 4-bit values
     // Add ambient to ensure areas are never completely dark
-    vec3 effective_light = max(light_color, vec3(AMBIENT_LIGHT));
+    vec3 effective_light = max(light_color, AMBIENT_LIGHT_COLOR);
     
     // Apply lighting and occlusion
     // effective_light provides the light color/intensity
