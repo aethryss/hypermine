@@ -28,6 +28,29 @@ use surface::Surface;
 use surface_extraction::{DrawBuffer, ExtractTask, ScratchBuffer, SurfaceExtraction};
 use skylight::SkylightShadow;
 
+pub const SKYLIGHT_SOFT_EDGE_BLOCKS: f32 = 8.0;
+pub const SKYLIGHT_TEXELS_PER_BLOCK: f32 = 2.0;
+
+fn absolute_voxel_size(chunk_size: u8) -> f32 {
+    // This matches the `common::sim_config::meters_to_absolute` derivation, but we only need the
+    // absolute-unit size of a voxel for scaling the shadow map.
+    let a = common::math::MVector::from(
+        dodeca::Vertex::A.chunk_to_node() * na::Vector4::new(1.0, 0.5, 0.5, 1.0),
+    )
+    .normalized_point();
+    let b = common::math::MVector::from(
+        dodeca::Vertex::A.chunk_to_node() * na::Vector4::new(0.0, 0.5, 0.5, 1.0),
+    )
+    .normalized_point();
+    let minimum_chunk_face_separation = a.distance(&b);
+    minimum_chunk_face_separation / f32::from(chunk_size)
+}
+
+fn next_power_of_two_clamped(x: u32, min: u32, max: u32) -> u32 {
+    let x = x.clamp(min, max);
+    x.next_power_of_two().clamp(min, max)
+}
+
 pub struct Voxels {
     config: Arc<Config>,
     surface_extraction: SurfaceExtraction,
@@ -60,15 +83,14 @@ impl Voxels {
             MAX_CHUNKS
         };
         let surfaces = DrawBuffer::new(gfx, max_chunks, dimension);
-        // Skylight shadow-map uses a fixed resolution; keep it constant regardless of window size.
-        let skylight = SkylightShadow::new(
-            gfx,
-            &surfaces,
-            vk::Extent2D {
-                width: 1024,
-                height: 1024,
-            },
-        );
+        // Skylight shadow-map resolution is derived from view distance so that texels-per-block is
+        // roughly constant across configs.
+        let view_distance_blocks = config.local_simulation.view_distance
+            / absolute_voxel_size(config.local_simulation.chunk_size);
+        let diameter_blocks = 2.0 * view_distance_blocks;
+        let desired_res = (diameter_blocks * SKYLIGHT_TEXELS_PER_BLOCK).ceil() as u32;
+        let res = next_power_of_two_clamped(desired_res, 512, 4096);
+        let skylight = SkylightShadow::new(gfx, &surfaces, vk::Extent2D { width: res, height: res });
 
         let mut draw = Surface::new(gfx, loader, &surfaces);
         unsafe {

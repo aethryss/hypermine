@@ -30,6 +30,48 @@ layout(constant_id = 1) const float alpha_cutoff = 0.5;
 //   b=47 -> 0.028426040
 const vec3 AMBIENT_LIGHT_COLOR = vec3(0.026241222, 0.025186860, 0.028426040);
 
+float skylight_visibility_pcf(vec2 base_uv, float shadow_z, float bias) {
+    // Out-of-range depth should behave like “no shadow map coverage”.
+    if (shadow_z < 0.0 || shadow_z > 1.0) {
+        return 1.0;
+    }
+
+    // If filter radius is ~0, fall back to a single hard compare.
+    float radius = max(skylight_params.w, 0.0);
+    if (radius < 0.01) {
+        float d = texture(skylight_shadow, base_uv).r;
+        return ((shadow_z - bias) > d) ? 0.0 : 1.0;
+    }
+
+    vec2 texel = 1.0 / vec2(textureSize(skylight_shadow, 0));
+    vec2 step_uv = texel * radius;
+
+    // Weighted 3x3 PCF (Gaussian-ish):
+    //   1 2 1
+    //   2 4 2
+    //   1 2 1
+    float vis = 0.0;
+    float wsum = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            float w = (dx == 0 && dy == 0) ? 4.0 : ((dx == 0 || dy == 0) ? 2.0 : 1.0);
+            vec2 uv = base_uv + vec2(float(dx), float(dy)) * step_uv;
+
+            // Treat samples that fall off the shadow map as “lit”, to avoid dark borders.
+            bool uv_ok = all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
+            float sample_vis = 1.0;
+            if (uv_ok) {
+                float d = texture(skylight_shadow, uv).r;
+                sample_vis = ((shadow_z - bias) > d) ? 0.0 : 1.0;
+            }
+
+            vis += w * sample_vis;
+            wsum += w;
+        }
+    }
+    return vis / wsum;
+}
+
 void main() {
     // texcoords.xy are normalized [0,1] face coordinates
     // texture_index is 0-255, mapping to 16×16 grid in terrain.png
@@ -61,15 +103,11 @@ void main() {
     // The shadow map is rendered in a Fermi-orthographic projection aligned with the local horizon plane.
     vec3 shadow_ndc = skylight_shadow_clip.xyz / skylight_shadow_clip.w;
     vec2 shadow_uv = shadow_ndc.xy * 0.5 + 0.5;
-    float shadow_depth = 1.0;
     bool shadow_valid = all(greaterThanEqual(shadow_uv, vec2(0.0))) && all(lessThanEqual(shadow_uv, vec2(1.0)));
     shadow_valid = shadow_valid && (shadow_ndc.z >= 0.0) && (shadow_ndc.z <= 1.0);
-    if (shadow_valid) {
-        shadow_depth = texture(skylight_shadow, shadow_uv).r;
-    }
     float bias = skylight_params.z;
-    bool in_shadow = shadow_valid && ((shadow_ndc.z - bias) > shadow_depth);
-    float shadow_factor = in_shadow ? (1.0 - skylight_params.y) : 1.0;
+    float visibility = shadow_valid ? skylight_visibility_pcf(shadow_uv, shadow_ndc.z, bias) : 1.0;
+    float shadow_factor = 1.0 - skylight_params.y * (1.0 - visibility);
     vec3 skylight = vec3(skylight_params.x) * shadow_factor;
     
     // Calculate effective light: combine block light with ambient
