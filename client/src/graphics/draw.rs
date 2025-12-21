@@ -759,8 +759,6 @@ fn compute_skylight_uniforms(
     skylight_params.x = 0.85; // intensity
     skylight_params.y = 0.85; // shadow strength
     skylight_params.z = 0.0015; // bias
-    skylight_params.w = crate::graphics::voxels::SKYLIGHT_SOFT_EDGE_BLOCKS
-        * crate::graphics::voxels::SKYLIGHT_TEXELS_PER_BLOCK;
 
     (skylight_view_projection, skylight_params, skylight_bounds)
 }

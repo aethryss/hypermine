@@ -22,7 +22,7 @@ layout(set = 0, binding = 0) uniform Common {
     // x: skylight intensity (added as white light)
     // y: shadow strength (0=no shadowing, 1=full shadowing)
     // z: depth bias
-    // w: shadow filter radius (in shadow-map texels, used for PCF/blur)
+    // w: unused
     vec4 skylight_params;
 
     // Skylight projection bounds in Klein coordinates.
