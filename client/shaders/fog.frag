@@ -8,42 +8,217 @@ layout(location = 0) out vec4 fog;
 
 layout(input_attachment_index=0, set=0, binding=1) uniform subpassInput depth;
 
-// Sky color constant
-const vec3 SKY_COLOR = vec3(0.5, 0.65, 0.9);
+// ============================================================================
+// Procedural Sky with Hyperbolic Angular Distortion
+// ============================================================================
 
-// Small, deterministic screen-space noise for dithering.
-// This is intentionally cheap and asset-free; it helps hide banding when the
-// fog alpha gradient is quantized by the render target format.
-float hash12(vec2 p) {
-    // A common 2D hash; returns [0, 1).
-    // The exact constants are not important as long as they're irrational-ish.
+// Hash functions for procedural noise
+float hash21(vec2 p) {
     float h = dot(p, vec2(127.1, 311.7));
     return fract(sin(h) * 43758.5453123);
 }
 
+float hash31(vec3 p) {
+    float h = dot(p, vec3(127.1, 311.7, 74.7));
+    return fract(sin(h) * 43758.5453123);
+}
+
+// Smooth noise for clouds
+float noise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f); // smoothstep
+    
+    float n000 = hash31(i + vec3(0, 0, 0));
+    float n100 = hash31(i + vec3(1, 0, 0));
+    float n010 = hash31(i + vec3(0, 1, 0));
+    float n110 = hash31(i + vec3(1, 1, 0));
+    float n001 = hash31(i + vec3(0, 0, 1));
+    float n101 = hash31(i + vec3(1, 0, 1));
+    float n011 = hash31(i + vec3(0, 1, 1));
+    float n111 = hash31(i + vec3(1, 1, 1));
+    
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+    
+    float nxy0 = mix(nx00, nx10, f.y);
+    float nxy1 = mix(nx01, nx11, f.y);
+    
+    return mix(nxy0, nxy1, f.z);
+}
+
+// Fractal Brownian motion for cloud detail
+float fbm(vec3 p) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    
+    for (int i = 0; i < 5; i++) {
+        value += amplitude * noise3(p * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+    return value;
+}
+
+// Apply hyperbolic angular distortion to a direction
+// In hyperbolic space, directions near the horizon are "compressed"
+// compared to Euclidean projection. This warps the sky to feel more
+// expansive overhead and compressed at the edges.
+vec3 hyperbolicWarpDirection(vec3 dir, vec3 up) {
+    // Compute angle from zenith (0 = straight up, PI = straight down)
+    float cosUp = dot(dir, up);
+    float angle = acos(clamp(cosUp, -1.0, 1.0));
+    
+    // In hyperbolic geometry, the "visual" angle grows faster near horizon
+    // We model this by applying a non-linear warp: pushing angles away from
+    // zenith, making the sky appear more "domed" overhead.
+    // The warp function: newAngle = angle + k * sin(angle) 
+    // This compresses angles near horizon (angle ≈ PI/2) more than near zenith
+    float k = 0.3; // Strength of hyperbolic distortion
+    float warpedAngle = angle + k * sin(angle);
+    warpedAngle = clamp(warpedAngle, 0.0, PI);
+    
+    // Reconstruct direction with warped angle
+    // Find the horizontal component of the direction
+    vec3 horizontal = dir - up * cosUp;
+    float horizLen = length(horizontal);
+    if (horizLen < 1e-6) {
+        // Direction is nearly vertical, no warp needed
+        return dir;
+    }
+    vec3 horizNorm = horizontal / horizLen;
+    
+    // New direction from warped angle
+    return up * cos(warpedAngle) + horizNorm * sin(warpedAngle);
+}
+
+// Compute procedural sky color for a given view-space direction
+// worldUp and worldNorth are stable reference directions in view space
+// worldNorth comes from a "compass" that experiences holonomy naturally but doesn't rotate with camera
+vec3 proceduralSky(vec3 worldDir, vec3 worldUp, vec3 worldNorth) {
+    // Apply hyperbolic angular distortion
+    vec3 dir = hyperbolicWarpDirection(worldDir, worldUp);
+    
+    // Height above horizon: 1 = zenith, 0 = horizon, -1 = nadir
+    float height = dot(dir, worldUp);
+    
+    // Build horizontal coordinate frame from up and north
+    // Project north onto horizontal plane to ensure it's perpendicular to up
+    vec3 north = normalize(worldNorth - worldUp * dot(worldNorth, worldUp));
+    vec3 east = cross(worldUp, north);
+    
+    // === Sky gradient ===
+    // Zenith: deeper blue; Horizon: lighter blue/white
+    vec3 zenithColor = vec3(0.25, 0.45, 0.85);
+    vec3 horizonColor = vec3(0.7, 0.8, 0.95);
+    vec3 nadirColor = vec3(0.3, 0.35, 0.45); // Dark below horizon
+    
+    vec3 skyColor;
+    if (height >= 0.0) {
+        // Above horizon: blend zenith to horizon
+        float t = sqrt(height); // Non-linear for more horizon color
+        skyColor = mix(horizonColor, zenithColor, t);
+    } else {
+        // Below horizon: darker
+        float t = sqrt(-height);
+        skyColor = mix(horizonColor, nadirColor, t);
+    }
+    
+    // === Sun ===
+    // Sun direction: fixed in world space, moving slowly with time
+    float sunAzimuth = time * 0.1 * PI * 2.0; // Complete cycle every 10 seconds (for testing)
+    float sunElevation = 0.4; // About 25 degrees above horizon
+    // Use pre-computed east/north from stable world reference
+    vec3 sunDir = normalize(
+        worldUp * sin(sunElevation) + 
+        (cos(sunAzimuth) * east + sin(sunAzimuth) * north) * cos(sunElevation)
+    );
+    
+    float sunDot = dot(dir, sunDir);
+    float sunIntensity = pow(max(0.0, sunDot), 256.0); // Sharp sun disc
+    float sunGlow = pow(max(0.0, sunDot), 8.0) * 0.3;   // Soft glow
+    vec3 sunColor = vec3(1.0, 0.95, 0.8);
+    skyColor += sunColor * (sunIntensity + sunGlow);
+    
+    // === Clouds ===
+    // Clouds exist on a conceptual "dome" at infinity
+    // We use horizontal coordinates for cloud sampling, warped by hyperbolic distortion
+    if (height > -0.1) {
+        // Project direction onto a plane for cloud coordinates
+        // Use a dome mapping: as we approach horizon, clouds stretch
+        vec3 horizComp = dir - worldUp * height;
+        float horizMag = length(horizComp);
+        
+        // Cloud UV coordinates: map direction to 2D
+        // Scale by 1/(height+epsilon) to make clouds stretch at horizon (perspective)
+        float cloudScale = 3.0;
+        float perspectiveStretch = 1.0 / (height + 0.15);
+        perspectiveStretch = min(perspectiveStretch, 8.0); // Cap to avoid infinities
+        
+        vec2 cloudUV;
+        if (horizMag > 1e-6) {
+            vec3 horizDir = horizComp / horizMag;
+            // Get stable 2D coordinates from horizontal direction
+            float u = dot(horizDir, east);
+            float v = dot(horizDir, north);
+            cloudUV = vec2(u, v) * cloudScale * perspectiveStretch;
+        } else {
+            cloudUV = vec2(0.0);
+        }
+        
+        // Animate clouds slowly
+        vec3 cloudPos = vec3(cloudUV + time * 0.02, time * 0.01);
+        float cloudNoise = fbm(cloudPos);
+        
+        // Shape clouds: threshold and smooth
+        float cloudDensity = smoothstep(0.4, 0.7, cloudNoise);
+        
+        // Clouds fade out near horizon and below
+        float cloudFade = smoothstep(-0.1, 0.3, height);
+        cloudDensity *= cloudFade;
+        
+        // Cloud color: white, slightly tinted by sun
+        vec3 cloudColor = vec3(1.0, 0.98, 0.96);
+        // Clouds near sun are brighter
+        float cloudSunLight = pow(max(0.0, sunDot), 2.0) * 0.3 + 0.7;
+        cloudColor *= cloudSunLight;
+        
+        skyColor = mix(skyColor, cloudColor, cloudDensity * 0.8);
+    }
+    
+    return skyColor;
+}
+
 void main() {
+    // Reconstruct view-space position from depth
     vec4 clip_pos = vec4(texcoords * 2.0 - 1.0, subpassLoad(depth).x, 1.0);
     vec4 scaled_view_pos = inverse_projection * clip_pos;
-    // Cancel out perspective, obtaining klein ball position
     vec3 view_pos = scaled_view_pos.xyz / scaled_view_pos.w;
     float view_length = length(view_pos);
-    // Convert to true hyperbolic distance, taking care to respect atanh's domain
+    
+    // Convert to true hyperbolic distance
     float dist = view_length >= 1.0 ? INFINITY : atanh(view_length);
     
-    // Exponential^k fog: visibility decreases with distance
-    // visibility = 1.0 at distance 0 (scene fully visible)
-    // visibility → 0.0 as distance increases (scene fades to sky)
-    float visibility = exp(-pow(dist * fog_density, 5));
+    // Get view-space direction (normalized)
+    vec3 view_dir = view_length > 1e-6 ? view_pos / view_length : vec3(0.0, 0.0, -1.0);
     
-    // Fog alpha = how much to blend toward sky
-    // Near: fog_alpha = 0 (keep scene)
-    // Far: fog_alpha = 1 (show sky)
+    // world_up and world_north are in view space (computed on CPU)
+    vec3 up_dir = normalize(world_up.xyz);
+    vec3 north_dir = normalize(world_north.xyz);
+    
+    // Compute procedural sky color in view space
+    vec3 sky_color = proceduralSky(view_dir, up_dir, north_dir);
+    
+    // Exponential^k fog: visibility decreases with distance
+    float visibility = exp(-pow(dist * fog_density, 5));
     float fog_alpha = 1.0 - visibility;
 
-    // Dither fog alpha to reduce visible banding at high densities.
-    // Amplitude is ~1 LSB for an 8-bit channel.
-    float dither = (hash12(gl_FragCoord.xy + time * 60.0) - 0.5) / 255.0;
+    // Dither fog alpha to reduce visible banding
+    float dither = (hash21(gl_FragCoord.xy + time * 60.0) - 0.5) / 255.0;
     fog_alpha = clamp(fog_alpha + dither, 0.0, 1.0);
     
-    fog = vec4(SKY_COLOR, fog_alpha);
+    fog = vec4(sky_color, fog_alpha);
 }

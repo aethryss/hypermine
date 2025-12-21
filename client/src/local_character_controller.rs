@@ -10,6 +10,11 @@ pub struct LocalCharacterController {
 
     /// The quaternion adjustment to the character position to represent its actual apparent orientation
     orientation: na::UnitQuaternion<f32>,
+
+    /// A "compass" forward direction in position-local space (not affected by camera rotation).
+    /// This experiences holonomy naturally as you move through hyperbolic space, but stays
+    /// consistent across node boundaries and doesn't rotate when you look around.
+    compass_forward: na::UnitVector3<f32>,
 }
 
 impl LocalCharacterController {
@@ -18,6 +23,7 @@ impl LocalCharacterController {
             position: Position::origin(),
             orientation: na::UnitQuaternion::identity(),
             up: na::Vector::z_axis(),
+            compass_forward: na::Vector::x_axis(), // Initial "north"
         }
     }
 
@@ -43,13 +49,23 @@ impl LocalCharacterController {
     ) {
         if preserve_up_alignment {
             // Rotate the character orientation to stay consistent with changes in gravity
-            self.orientation = math::rotation_between_axis(&self.up, &up, 1e-5)
-                .unwrap_or(na::UnitQuaternion::identity())
-                * self.orientation;
+            let rotation = math::rotation_between_axis(&self.up, &up, 1e-5)
+                .unwrap_or(na::UnitQuaternion::identity());
+            self.orientation = rotation * self.orientation;
+            // Also rotate the compass forward to stay horizontal
+            self.compass_forward =
+                na::UnitVector3::new_normalize(rotation * self.compass_forward.as_ref());
         }
 
         self.position = position;
         self.up = up;
+    }
+
+    /// Get the compass forward direction in position-local space.
+    /// This is a horizontal "north" that experiences holonomy naturally but doesn't
+    /// rotate when the camera rotates.
+    pub fn compass_forward(&self) -> na::UnitVector3<f32> {
+        self.compass_forward
     }
 
     /// Rotates the camera's view by locally adding pitch and yaw.

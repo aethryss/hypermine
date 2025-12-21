@@ -449,8 +449,8 @@ impl Draw {
                     .clear_values(&[
                         vk::ClearValue {
                             color: vk::ClearColorValue {
-                                // Clear to sky color so translucent blocks blend correctly
-                                float32: [0.5, 0.65, 0.9, 1.0],
+                                // Clear to horizon sky color so translucent blocks blend correctly
+                                float32: [0.7, 0.8, 0.95, 1.0],
                             },
                         },
                         vk::ClearValue {
@@ -546,9 +546,44 @@ impl Draw {
             device.end_command_buffer(state.post_cmd).unwrap();
 
             // Specify the uniform data before actually submitting the command to transfer it
+            // inverse_view transforms from view space to node-local space (the camera's orientation)
+            let inverse_view = na::Matrix4::from(view.local);
+            // Get up and north directions for the sky, in VIEW SPACE.
+            // Up: from the node's surface normal
+            // North: from the "compass_forward" which experiences holonomy but doesn't rotate with camera
+            let (world_up, world_north) = sim
+                .as_ref()
+                .and_then(|s| {
+                    let node_state = s.graph[view.node].state.as_ref()?;
+                    let view_from_node = view.local.inverse();
+
+                    // Up from the node's surface normal
+                    let local_up = node_state.up_direction();
+                    let view_up = &view_from_node * local_up;
+                    let up3: na::Vector3<f32> = view_up.as_ref().xyz().normalize();
+
+                    // North from the compass forward direction (position-local space)
+                    // compass_forward is in position-local space (before orientation)
+                    // orientation rotates from position-local to view space
+                    let compass_fwd = s.compass_forward();
+                    let orientation = s.camera_orientation();
+                    let north3 = (orientation * compass_fwd.as_ref()).normalize();
+
+                    Some((
+                        na::Vector4::new(up3.x, up3.y, up3.z, 0.0),
+                        na::Vector4::new(north3.x, north3.y, north3.z, 0.0),
+                    ))
+                })
+                .unwrap_or((
+                    na::Vector4::new(0.0, 1.0, 0.0, 0.0),
+                    na::Vector4::new(0.0, 0.0, -1.0, 0.0),
+                ));
             state.uniforms.write(Uniforms {
                 view_projection,
                 inverse_projection: *projection.inverse().matrix(),
+                inverse_view,
+                world_up,
+                world_north,
                 fog_density: fog::density(self.cfg.local_simulation.fog_distance, 1e-3, 5.0),
                 time: self.epoch.elapsed().as_secs_f32().fract(),
             });
@@ -654,6 +689,12 @@ struct Uniforms {
     /// Camera projection matrix
     view_projection: na::Matrix4<f32>,
     inverse_projection: na::Matrix4<f32>,
+    /// Maps view space to world space (camera orientation)
+    inverse_view: na::Matrix4<f32>,
+    /// World up direction in view space (xyz, w unused for alignment)
+    world_up: na::Vector4<f32>,
+    /// World north direction in view space (xyz, w unused for alignment)
+    world_north: na::Vector4<f32>,
     fog_density: f32,
     /// Cycles through [0,1) once per second for simple animation effects
     time: f32,

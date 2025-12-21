@@ -175,8 +175,11 @@ impl NodeState {
         }
     }
 
+    /// Returns the up direction (away from terrain, into the sky).
+    /// Note: surface normal points INTO terrain (positive = underground),
+    /// so we negate it to get the direction pointing up/out.
     pub fn up_direction(&self) -> MVector<f32> {
-        *self.surface.scaled_normal()
+        -*self.surface.scaled_normal()
     }
 
     pub fn world_from_node(&self) -> &MIsometry<f32> {

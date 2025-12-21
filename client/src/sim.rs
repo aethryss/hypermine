@@ -534,6 +534,18 @@ impl Sim {
         pos
     }
 
+    /// Get the compass forward direction in position-local space.
+    /// This is a stable "north" reference that experiences holonomy naturally but
+    /// doesn't rotate when the camera rotates.
+    pub fn compass_forward(&self) -> na::UnitVector3<f32> {
+        self.local_character_controller.compass_forward()
+    }
+
+    /// Get the camera orientation quaternion
+    pub fn camera_orientation(&self) -> na::UnitQuaternion<f32> {
+        self.local_character_controller.orientation()
+    }
+
     /// Destroy all aspects of an entity
     fn destroy(&mut self, entity: Entity) {
         let id = *self
