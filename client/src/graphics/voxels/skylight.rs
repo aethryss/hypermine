@@ -5,7 +5,7 @@ use vk_shader_macros::include_glsl;
 use crate::graphics::Base;
 use common::defer;
 
-use super::surface::TRANSFORM_SIZE;
+use super::surface::{OPAQUE, TRANSLUCENT, TRANSFORM_SIZE};
 use super::surface_extraction::DrawBuffer;
 
 const VERT: &[u32] = include_glsl!("shaders/skylight.vert");
@@ -23,7 +23,8 @@ pub struct SkylightShadow {
 
     static_ds_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
-    descriptor_set: vk::DescriptorSet,
+    descriptor_set_opaque: vk::DescriptorSet,
+    descriptor_set_translucent: vk::DescriptorSet,
 
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -150,33 +151,47 @@ impl SkylightShadow {
             let descriptor_pool = device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(1)
+                        .max_sets(2)
                         .pool_sizes(&[vk::DescriptorPoolSize {
                             ty: vk::DescriptorType::STORAGE_BUFFER,
-                            descriptor_count: 1,
+                            descriptor_count: 2,
                         }]),
                     None,
                 )
                 .unwrap();
 
-            let descriptor_set = device
+            let descriptor_sets = device
                 .allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
                         .descriptor_pool(descriptor_pool)
-                        .set_layouts(&[static_ds_layout]),
+                        .set_layouts(&[static_ds_layout, static_ds_layout]),
                 )
-                .unwrap()[0];
+                .unwrap();
+
+            let descriptor_set_opaque = descriptor_sets[0];
+            let descriptor_set_translucent = descriptor_sets[1];
 
             device.update_descriptor_sets(
-                &[vk::WriteDescriptorSet::default()
-                    .dst_set(descriptor_set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(&[vk::DescriptorBufferInfo {
-                        buffer: buffer.face_buffer(super::surface::OPAQUE),
-                        offset: 0,
-                        range: vk::WHOLE_SIZE,
-                    }])],
+                &[
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set_opaque)
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(&[vk::DescriptorBufferInfo {
+                            buffer: buffer.face_buffer(OPAQUE),
+                            offset: 0,
+                            range: vk::WHOLE_SIZE,
+                        }]),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set_translucent)
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(&[vk::DescriptorBufferInfo {
+                            buffer: buffer.face_buffer(TRANSLUCENT),
+                            offset: 0,
+                            range: vk::WHOLE_SIZE,
+                        }]),
+                ],
                 &[],
             );
 
@@ -304,7 +319,8 @@ impl SkylightShadow {
                 sampler,
                 static_ds_layout,
                 descriptor_pool,
-                descriptor_set,
+                descriptor_set_opaque,
+                descriptor_set_translucent,
                 pipeline_layout,
                 pipeline,
             }
@@ -388,15 +404,6 @@ impl SkylightShadow {
             device.cmd_set_scissor(cmd, 0, &scissors);
 
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &[common_ds, self.descriptor_set],
-                &[],
-            );
-
             device.cmd_bind_vertex_buffers(cmd, 0, &[frame.transforms_buffer()], &[0]);
             device.cmd_push_constants(
                 cmd,
@@ -406,15 +413,31 @@ impl SkylightShadow {
                 &dimension.to_ne_bytes(),
             );
 
-            // Draw only opaque surfaces for occlusion.
-            for chunk in drawn_chunks {
-                device.cmd_draw_indirect(
+            // Occlusion policy:
+            // - Opaque blocks occlude
+            // - Translucent blocks (e.g. water) occlude
+            // - Cutout blocks do NOT occlude (skip)
+            for &(class_idx, ds) in &[
+                (OPAQUE, self.descriptor_set_opaque),
+                (TRANSLUCENT, self.descriptor_set_translucent),
+            ] {
+                device.cmd_bind_descriptor_sets(
                     cmd,
-                    buffer.indirect_buffer(super::surface::OPAQUE),
-                    buffer.indirect_offset(chunk.0),
-                    1,
-                    16,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout,
+                    0,
+                    &[common_ds, ds],
+                    &[],
                 );
+                for chunk in drawn_chunks {
+                    device.cmd_draw_indirect(
+                        cmd,
+                        buffer.indirect_buffer(class_idx),
+                        buffer.indirect_offset(chunk.0),
+                        1,
+                        16,
+                    );
+                }
             }
 
             device.cmd_end_render_pass(cmd);

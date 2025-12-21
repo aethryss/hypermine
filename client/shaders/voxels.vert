@@ -65,23 +65,27 @@ void main()  {
     vec3 relative_coords = vertices[axis][vertex] + pos;
 
     // Quantize skylight shadowing per face by evaluating at the face center.
-    // This keeps shadows block-sharp and stable.
+    // NOTE: surfaces are always emitted on the negative-side boundary for the chosen axis
+    // (see surface-extraction: faces between a voxel and its neighbor in the -X/-Y/-Z direction).
+    // The axis variants ("+X/+Y/+Z" and diagonal flips) only change winding/diagonal, not position.
     vec3 face_center = vec3(pos) + vec3(0.5);
-    uint base_axis = axis % 6;
-    if (base_axis == 0u) { // -X
+    uint coord_axis = axis % 3u;
+    if (coord_axis == 0u) {
         face_center.x = float(pos.x);
-    } else if (base_axis == 3u) { // +X
-        face_center.x = float(pos.x) + 1.0;
-    } else if (base_axis == 1u) { // -Y
+    } else if (coord_axis == 1u) {
         face_center.y = float(pos.y);
-    } else if (base_axis == 4u) { // +Y
-        face_center.y = float(pos.y) + 1.0;
-    } else if (base_axis == 2u) { // -Z
+    } else {
         face_center.z = float(pos.z);
-    } else if (base_axis == 5u) { // +Z
-        face_center.z = float(pos.z) + 1.0;
     }
-    skylight_shadow_clip = skylight_view_projection * transform * vec4(face_center / dimension, 1.0);
+    vec4 fermi = skylight_view_projection * transform * vec4(face_center / dimension, 1.0);
+    if (fermi.w < 0.0) {
+        fermi *= -1.0;
+    }
+    float invw = 1.0 / max(fermi.w, 1.0e-6);
+    float ndc_x = (fermi.y * invw) / skylight_bounds.x;
+    float ndc_y = (fermi.z * invw) / skylight_bounds.y;
+    float ndc_z = 0.5 * (fermi.x * invw + 1.0);
+    skylight_shadow_clip = vec4(ndc_x, ndc_y, ndc_z, 1.0);
 
     gl_Position = view_projection * transform * vec4(relative_coords / dimension, 1);
 }

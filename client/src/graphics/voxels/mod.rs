@@ -113,7 +113,7 @@ impl Voxels {
                 cmd,
                 &frame.surface,
                 &self.surfaces,
-                &frame.drawn,
+                &frame.shadow_drawn,
             );
         }
     }
@@ -138,6 +138,9 @@ impl Voxels {
         for chunk in frame.drawn.drain(..) {
             self.states.peek_mut(chunk).refcount -= 1;
         }
+        for chunk in frame.shadow_drawn.drain(..) {
+            self.states.peek_mut(chunk).refcount -= 1;
+        }
 
         // Determine what to load/render
         let view = sim.view();
@@ -153,11 +156,7 @@ impl Voxels {
         for &(node, ref node_transform) in nearby_nodes {
             let node_to_view = local_to_view * node_transform;
             let origin = node_to_view * MPoint::origin();
-            if !frustum_planes.contain(&origin, dodeca::BOUNDING_SPHERE_RADIUS) {
-                // Don't bother generating or drawing chunks from nodes that are wholly outside the
-                // frustum.
-                continue;
-            }
+            let node_visible = frustum_planes.contain(&origin, dodeca::BOUNDING_SPHERE_RADIUS);
 
             use Chunk::*;
             for vertex in Vertex::iter() {
@@ -176,12 +175,19 @@ impl Voxels {
                 };
 
                 if let Some(slot) = surface.or(*old_surface) {
-                    // Render an already-extracted surface
+                    // Always include nearby opaque surfaces in the skylight occlusion pass.
+                    // This avoids chunk-boundary shadow discontinuities when occluders are just
+                    // outside the camera frustum.
                     self.states.get_mut(slot).refcount += 1;
-                    frame.drawn.push(slot);
-                    // Transfer transform
+                    frame.shadow_drawn.push(slot);
                     frame.surface.transforms_mut()[slot.0 as usize] =
                         na::Matrix4::from(*node_transform) * vertex.chunk_to_node();
+
+                    // Render the surface in the main pass only if it's in the camera frustum.
+                    if node_visible {
+                        self.states.get_mut(slot).refcount += 1;
+                        frame.drawn.push(slot);
+                    }
                 }
                 
                 // Check if we need to extract: either no surface, or light changed
@@ -320,6 +326,8 @@ pub struct Frame {
     /// Scratch slots completed in this frame
     extracted: Vec<u32>,
     drawn: Vec<SlotId>,
+    /// Chunks drawn into the skylight shadow map (broader than frustum-culling).
+    shadow_drawn: Vec<SlotId>,
 }
 
 impl Frame {
@@ -336,6 +344,7 @@ impl Frame {
             surface: surface::Frame::new(gfx, ctx.states.capacity()),
             extracted: Vec::new(),
             drawn: Vec::new(),
+            shadow_drawn: Vec::new(),
         }
     }
 }

@@ -42,5 +42,13 @@ void main() {
     uint axis = get_axis(s);
 
     vec3 relative_coords = vertices[axis][vertex] + pos;
-    gl_Position = skylight_view_projection * transform * vec4(relative_coords / dimension, 1.0);
+    vec4 fermi = skylight_view_projection * transform * vec4(relative_coords / dimension, 1.0);
+    if (fermi.w < 0.0) {
+        fermi *= -1.0;
+    }
+    float invw = 1.0 / max(fermi.w, 1.0e-6);
+    float ndc_x = (fermi.y * invw) / skylight_bounds.x;
+    float ndc_y = (fermi.z * invw) / skylight_bounds.y;
+    float ndc_z = 0.5 * (fermi.x * invw + 1.0);
+    gl_Position = vec4(ndc_x, ndc_y, ndc_z, 1.0);
 }

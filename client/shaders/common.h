@@ -24,6 +24,12 @@ layout(set = 0, binding = 0) uniform Common {
     // z: depth bias
     // w: unused
     vec4 skylight_params;
+
+    // Skylight projection bounds in Klein coordinates.
+    // x: max_u for (y/w)
+    // y: max_v for (z/w)
+    // z,w: unused
+    vec4 skylight_bounds;
     // World up direction in view space (normalized, xyz only, w unused)
     vec4 world_up;
     // World north direction in view space (from compass, xyz only, w unused)

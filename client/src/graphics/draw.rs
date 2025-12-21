@@ -433,7 +433,7 @@ impl Draw {
             histogram!("frame.cpu.nearby_nodes").record(nearby_nodes_started.elapsed());
 
             // Precompute skylight uniforms while we still have nearby node transforms.
-            let (skylight_view_projection, skylight_params) =
+            let (skylight_view_projection, skylight_params, skylight_bounds) =
                 compute_skylight_uniforms(sim.as_deref(), &view, &nearby_nodes);
 
             if let (Some(voxels), Some(sim)) = (self.voxels.as_mut(), sim.as_mut()) {
@@ -628,6 +628,7 @@ impl Draw {
                 inverse_view,
                 skylight_view_projection,
                 skylight_params,
+                skylight_bounds,
                 world_up,
                 world_north,
                 fog_density: fog::density(self.cfg.local_simulation.fog_distance, 1e-3, 5.0),
@@ -673,20 +674,21 @@ fn compute_skylight_uniforms(
     sim: Option<&Sim>,
     view: &Position,
     nearby_nodes: &[(NodeId, MIsometry<f32>)],
-) -> (na::Matrix4<f32>, na::Vector4<f32>) {
+) -> (na::Matrix4<f32>, na::Vector4<f32>, na::Vector4<f32>) {
     // Default: disabled skylight
     let mut skylight_params = na::Vector4::new(0.0, 0.0, 0.001, 0.0);
     let mut skylight_view_projection = na::Matrix4::identity();
+    let mut skylight_bounds = na::Vector4::new(0.25, 0.25, 0.0, 0.0);
 
     let Some(sim) = sim else {
-        return (skylight_view_projection, skylight_params);
+        return (skylight_view_projection, skylight_params, skylight_bounds);
     };
     if !sim.graph.contains(view.node) {
-        return (skylight_view_projection, skylight_params);
+        return (skylight_view_projection, skylight_params, skylight_bounds);
     }
     let node_state = match sim.graph[view.node].state.as_ref() {
         Some(s) => s,
-        None => return (skylight_view_projection, skylight_params),
+        None => return (skylight_view_projection, skylight_params, skylight_bounds),
     };
 
     // View-from-node (camera transform). This matches how `view_projection` is built.
@@ -706,7 +708,7 @@ fn compute_skylight_uniforms(
         // Fallback: use the engine's robust relative-up (Euclidean XYZ normalization).
         // This is only used when the Minkowski normal becomes degenerate.
         let Some(up_view) = sim.graph.get_relative_up(view) else {
-            return (skylight_view_projection, skylight_params);
+            return (skylight_view_projection, skylight_params, skylight_bounds);
         };
         let down_view = na::UnitVector3::new_unchecked(-up_view.into_inner());
         down_view.into()
@@ -732,47 +734,33 @@ fn compute_skylight_uniforms(
     for &(_node, node_to_viewnode) in nearby_nodes {
         let p_view = view_from_node * node_to_viewnode * MPoint::origin();
         let p_fermi = fermi_from_view * p_view;
-        let w = p_fermi.w.max(1.0e-6);
-        max_u = max_u.max((p_fermi.y / w).abs());
-        max_v = max_v.max((p_fermi.z / w).abs());
+        // Homogeneous sign is arbitrary: use a positive w for stable Klein projections.
+        let mut v: na::Vector4<f32> = p_fermi.into();
+        if v.w < 0.0 {
+            v = -v;
+        }
+        let w = v.w.max(1.0e-6);
+        max_u = max_u.max((v.y / w).abs());
+        max_v = max_v.max((v.z / w).abs());
     }
     let inflate = libm::tanhf(dodeca::BOUNDING_SPHERE_RADIUS);
     max_u = (max_u + inflate).min(0.95).max(0.05);
     max_v = (max_v + inflate).min(0.95).max(0.05);
 
-    // Fermi orthographic projection in Klein coords:
-    // ndc_x = (y/w) / max_u
-    // ndc_y = (z/w) / max_v
-    // ndc_z = 0.5 * (x/w + 1.0)  in [0, 1]
-    // Implemented projectively with clip_w = w.
-    let p = na::Matrix4::new(
-        0.0,
-        1.0 / max_u,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0 / max_v,
-        0.0,
-        0.5,
-        0.0,
-        0.0,
-        0.5,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    );
+    skylight_bounds.x = max_u;
+    skylight_bounds.y = max_v;
 
+    // Store just the node->Fermi transform. Shaders will compute Klein ratios explicitly,
+    // which avoids artifacts from using a projective matrix with varying clip.w.
     skylight_view_projection =
-        p * na::Matrix4::from(fermi_from_view) * na::Matrix4::from(view_from_node);
+        na::Matrix4::from(fermi_from_view) * na::Matrix4::from(view_from_node);
 
     // Defaults: moderately bright skylight, strong shadows.
     skylight_params.x = 0.85; // intensity
     skylight_params.y = 0.85; // shadow strength
     skylight_params.z = 0.0015; // bias
 
-    (skylight_view_projection, skylight_params)
+    (skylight_view_projection, skylight_params, skylight_bounds)
 }
 
 impl Drop for Draw {
@@ -847,6 +835,7 @@ struct Uniforms {
     /// Skylight shadow-map projection + parameters
     skylight_view_projection: na::Matrix4<f32>,
     skylight_params: na::Vector4<f32>,
+    skylight_bounds: na::Vector4<f32>,
     /// World up direction in view space (xyz, w unused for alignment)
     world_up: na::Vector4<f32>,
     /// World north direction in view space (xyz, w unused for alignment)
