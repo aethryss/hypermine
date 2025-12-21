@@ -564,10 +564,12 @@ impl Draw {
 
                     // North from the compass forward direction (position-local space)
                     // compass_forward is in position-local space (before orientation)
-                    // orientation rotates from position-local to view space
+                    // To get to view space, we apply the inverse of the camera orientation
                     let compass_fwd = s.compass_forward();
                     let orientation = s.camera_orientation();
-                    let north3 = (orientation * compass_fwd.as_ref()).normalize();
+                    // orientation maps position-local to view, so inverse maps view to position-local
+                    // Therefore: view_dir = orientation * position_local_dir
+                    let north3 = (orientation.inverse() * compass_fwd.as_ref()).normalize();
 
                     Some((
                         na::Vector4::new(up3.x, up3.y, up3.z, 0.0),
@@ -585,7 +587,7 @@ impl Draw {
                 world_up,
                 world_north,
                 fog_density: fog::density(self.cfg.local_simulation.fog_distance, 1e-3, 5.0),
-                time: self.epoch.elapsed().as_secs_f32().fract(),
+                time: self.epoch.elapsed().as_secs_f32(),
             });
 
             // Submit the commands to the GPU

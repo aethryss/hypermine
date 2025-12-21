@@ -143,50 +143,56 @@ vec3 proceduralSky(vec3 worldDir, vec3 worldUp, vec3 worldNorth) {
     vec3 sunColor = vec3(1.0, 0.95, 0.8);
     skyColor += sunColor * (sunIntensity + sunGlow);
     
-    // === Clouds ===
-    // Clouds exist on a conceptual "dome" at infinity
-    // We use horizontal coordinates for cloud sampling, warped by hyperbolic distortion
-    if (height > -0.1) {
-        // Project direction onto a plane for cloud coordinates
-        // Use a dome mapping: as we approach horizon, clouds stretch
-        vec3 horizComp = dir - worldUp * height;
-        float horizMag = length(horizComp);
+    // === Minecraft-style Pixelated Clouds ===
+    // Blocky clouds on a flat infinite plane at a fixed height above the viewer
+    float cloudPlaneHeight = 128.0; // World-space height of cloud plane
+    if (height > 0.01) {
+        // Ray-plane intersection: plane is at y = cloudPlaneHeight (in world up direction)
+        // Ray: origin = 0, direction = dir
+        // Plane: dot(p, worldUp) = cloudPlaneHeight
+        // Intersection t: t * dot(dir, worldUp) = cloudPlaneHeight
+        // So t = cloudPlaneHeight / height (since height = dot(dir, worldUp))
+        float t = cloudPlaneHeight / height;
         
-        // Cloud UV coordinates: map direction to 2D
-        // Scale by 1/(height+epsilon) to make clouds stretch at horizon (perspective)
-        float cloudScale = 3.0;
-        float perspectiveStretch = 1.0 / (height + 0.15);
-        perspectiveStretch = min(perspectiveStretch, 8.0); // Cap to avoid infinities
+        // Intersection point on the cloud plane
+        vec3 cloudPoint = dir * t;
         
-        vec2 cloudUV;
-        if (horizMag > 1e-6) {
-            vec3 horizDir = horizComp / horizMag;
-            // Get stable 2D coordinates from horizontal direction
-            float u = dot(horizDir, east);
-            float v = dot(horizDir, north);
-            cloudUV = vec2(u, v) * cloudScale * perspectiveStretch;
-        } else {
-            cloudUV = vec2(0.0);
+        // Project to 2D coordinates on the plane using east/north basis
+        float u = dot(cloudPoint, east);
+        float v = dot(cloudPoint, north);
+        
+        // Scale down and animate - clouds drift slowly eastward
+        float cloudScale = 0.02; // Controls cloud size (smaller = larger clouds)
+        vec2 cloudUV = vec2(u, v) * cloudScale + vec2(time * 0.5, 0.0);
+        
+        // === Pixelation: quantize to grid ===
+        float pixelSize = 1.0; // Size of each cloud "pixel" in cloud UV space
+        vec2 pixelUV = floor(cloudUV / pixelSize);
+        
+        // Simple deterministic hash for cloud pattern
+        float cloudHash = hash21(pixelUV);
+        
+        // Create blocky cloud shapes using threshold
+        // Use a second hash at coarser scale for cloud clusters
+        vec2 clusterUV = floor(cloudUV / (pixelSize * 6.0));
+        float clusterHash = hash21(clusterUV + vec2(42.0, 17.0));
+        
+        // Cloud exists if both cluster and local hash pass threshold
+        bool inCloud = (clusterHash > 0.55) && (cloudHash > 0.35);
+        
+        if (inCloud) {
+            // Distance-based fade: clouds far away should fade into sky
+            float cloudDistance = length(vec2(u, v));
+            float distanceFade = 1.0 - smoothstep(3000.0, 6000.0, cloudDistance);
+            
+            // Flat white cloud color
+            vec3 cloudColor = vec3(1.0, 1.0, 1.0);
+            
+            // Fade clouds near horizon to blend with fog
+            float cloudFade = smoothstep(0.01, 0.15, height) * distanceFade;
+            
+            skyColor = mix(skyColor, cloudColor, cloudFade);
         }
-        
-        // Animate clouds slowly
-        vec3 cloudPos = vec3(cloudUV + time * 0.02, time * 0.01);
-        float cloudNoise = fbm(cloudPos);
-        
-        // Shape clouds: threshold and smooth
-        float cloudDensity = smoothstep(0.4, 0.7, cloudNoise);
-        
-        // Clouds fade out near horizon and below
-        float cloudFade = smoothstep(-0.1, 0.3, height);
-        cloudDensity *= cloudFade;
-        
-        // Cloud color: white, slightly tinted by sun
-        vec3 cloudColor = vec3(1.0, 0.98, 0.96);
-        // Clouds near sun are brighter
-        float cloudSunLight = pow(max(0.0, sunDot), 2.0) * 0.3 + 0.7;
-        cloudColor *= cloudSunLight;
-        
-        skyColor = mix(skyColor, cloudColor, cloudDensity * 0.8);
     }
     
     return skyColor;
