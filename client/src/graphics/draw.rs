@@ -113,7 +113,8 @@ impl Draw {
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::INPUT_ATTACHMENT,
-                                descriptor_count: PIPELINE_DEPTH,
+                                // 2 input attachments per frame: scene color + depth
+                                descriptor_count: PIPELINE_DEPTH * 2,
                             },
                         ]),
                     None,
@@ -281,9 +282,9 @@ impl Draw {
 
     /// Submit commands to the GPU to draw a frame
     ///
-    /// `framebuffer` must have a color and depth buffer attached and have the dimensions specified
-    /// in `extent`. The `present` semaphore is signaled when rendering is complete and the color
-    /// image can be presented.
+    /// `framebuffer` must have swapchain color, scene color, and depth buffers attached and have
+    /// the dimensions specified in `extent`. The `present` semaphore is signaled when rendering
+    /// is complete and the color image can be presented.
     ///
     /// Submits commands that wait on `image_acquired` before writing to `framebuffer`'s color
     /// attachment.
@@ -293,6 +294,7 @@ impl Draw {
         mut sim: Option<&mut Sim>,
         yakui_paint_dom: &yakui::paint::PaintDom,
         framebuffer: vk::Framebuffer,
+        scene_color_view: vk::ImageView,
         depth_view: vk::ImageView,
         extent: vk::Extent2D,
         present: vk::Semaphore,
@@ -321,17 +323,29 @@ impl Draw {
             device.reset_fences(&[state.fence]).unwrap();
             self.next_state = (self.next_state + 1) % PIPELINE_DEPTH as usize;
 
-            // Set up framebuffer attachments
+            // Set up framebuffer attachments for the composite pass (subpass 1)
+            // Binding 1: scene color, Binding 2: depth
             device.update_descriptor_sets(
-                &[vk::WriteDescriptorSet::default()
-                    .dst_set(state.common_ds)
-                    .dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
-                    .image_info(&[vk::DescriptorImageInfo {
-                        sampler: vk::Sampler::null(),
-                        image_view: depth_view,
-                        image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                    }])],
+                &[
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(state.common_ds)
+                        .dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
+                        .image_info(&[vk::DescriptorImageInfo {
+                            sampler: vk::Sampler::null(),
+                            image_view: scene_color_view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        }]),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(state.common_ds)
+                        .dst_binding(2)
+                        .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
+                        .image_info(&[vk::DescriptorImageInfo {
+                            sampler: vk::Sampler::null(),
+                            image_view: depth_view,
+                            image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        }]),
+                ],
                 &[],
             );
 
@@ -446,13 +460,22 @@ impl Draw {
                         offset: vk::Offset2D::default(),
                         extent,
                     })
+                    // Clear values for: [swapchain, scene_color, depth]
                     .clear_values(&[
+                        // Attachment 0: Swapchain - don't care, will be overwritten by composite
                         vk::ClearValue {
                             color: vk::ClearColorValue {
-                                // Clear to horizon sky color so translucent blocks blend correctly
-                                float32: [0.7, 0.8, 0.95, 1.0],
+                                float32: [0.0, 0.0, 0.0, 1.0],
                             },
                         },
+                        // Attachment 1: Scene color - clear to transparent black
+                        // Alpha=0 means "no geometry here, show sky"
+                        vk::ClearValue {
+                            color: vk::ClearColorValue {
+                                float32: [0.0, 0.0, 0.0, 0.0],
+                            },
+                        },
+                        // Attachment 2: Depth - clear to 0 (reverse-Z, far plane)
                         vk::ClearValue {
                             depth_stencil: vk::ClearDepthStencilValue {
                                 depth: 0.0,

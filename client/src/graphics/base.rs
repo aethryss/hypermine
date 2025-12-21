@@ -158,19 +158,35 @@ impl Base {
                 )
                 .unwrap();
 
+            // Render pass with 3 attachments:
+            // 0: Swapchain (final output) - only written in subpass 1 (composite)
+            // 1: Scene color (RGBA) - scene renders here in subpass 0, read in subpass 1
+            // 2: Depth - written in subpass 0, read in subpass 1
             let render_pass = device
                 .create_render_pass(
                     &vk::RenderPassCreateInfo::default()
                         .attachments(&[
+                            // Attachment 0: Swapchain output
                             vk::AttachmentDescription {
                                 format: COLOR_FORMAT,
                                 samples: vk::SampleCountFlags::TYPE_1,
-                                load_op: vk::AttachmentLoadOp::CLEAR,
+                                load_op: vk::AttachmentLoadOp::DONT_CARE, // We overwrite everything in composite
                                 store_op: vk::AttachmentStoreOp::STORE,
                                 initial_layout: vk::ImageLayout::UNDEFINED,
                                 final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
                                 ..Default::default()
                             },
+                            // Attachment 1: Scene color (intermediate)
+                            vk::AttachmentDescription {
+                                format: SCENE_COLOR_FORMAT,
+                                samples: vk::SampleCountFlags::TYPE_1,
+                                load_op: vk::AttachmentLoadOp::CLEAR,
+                                store_op: vk::AttachmentStoreOp::DONT_CARE, // Only needed within render pass
+                                initial_layout: vk::ImageLayout::UNDEFINED,
+                                final_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                                ..Default::default()
+                            },
+                            // Attachment 2: Depth
                             vk::AttachmentDescription {
                                 format: vk::Format::D32_SFLOAT,
                                 samples: vk::SampleCountFlags::TYPE_1,
@@ -182,28 +198,37 @@ impl Base {
                             },
                         ])
                         .subpasses(&[
+                            // Subpass 0: Render scene to scene color + depth
                             vk::SubpassDescription::default()
                                 .color_attachments(&[vk::AttachmentReference {
-                                    attachment: 0,
+                                    attachment: 1, // Scene color
                                     layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                                 }])
                                 .depth_stencil_attachment(&vk::AttachmentReference {
-                                    attachment: 1,
+                                    attachment: 2, // Depth
                                     layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                 })
                                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS),
+                            // Subpass 1: Composite scene over sky with fog, output to swapchain
                             vk::SubpassDescription::default()
                                 .color_attachments(&[vk::AttachmentReference {
-                                    attachment: 0,
+                                    attachment: 0, // Swapchain
                                     layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                                 }])
-                                .input_attachments(&[vk::AttachmentReference {
-                                    attachment: 1,
-                                    layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                                }])
+                                .input_attachments(&[
+                                    vk::AttachmentReference {
+                                        attachment: 1, // Scene color
+                                        layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                    },
+                                    vk::AttachmentReference {
+                                        attachment: 2, // Depth
+                                        layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                                    },
+                                ])
                                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS),
                         ])
                         .dependencies(&[
+                            // External -> Subpass 0
                             vk::SubpassDependency {
                                 src_subpass: vk::SUBPASS_EXTERNAL,
                                 dst_subpass: 0,
@@ -217,14 +242,16 @@ impl Base {
                                     | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
                                 ..Default::default()
                             },
+                            // Subpass 0 -> Subpass 1: scene color + depth become input attachments
                             vk::SubpassDependency {
                                 src_subpass: 0,
                                 dst_subpass: 1,
-                                src_stage_mask: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS, // depth write
-                                dst_stage_mask: vk::PipelineStageFlags::FRAGMENT_SHADER, // subpass input
-
-                                src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                                src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                                dst_stage_mask: vk::PipelineStageFlags::FRAGMENT_SHADER,
+                                src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
                                 dst_access_mask: vk::AccessFlags::INPUT_ATTACHMENT_READ,
                                 dependency_flags: vk::DependencyFlags::BY_REGION,
                             },
@@ -258,9 +285,17 @@ impl Base {
                                 | vk::ShaderStageFlags::FRAGMENT,
                             ..Default::default()
                         },
-                        // Depth buffer
+                        // Scene color buffer (input attachment for composite pass)
                         vk::DescriptorSetLayoutBinding {
                             binding: 1,
+                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                            ..Default::default()
+                        },
+                        // Depth buffer (input attachment for composite pass)
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 2,
                             descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
                             descriptor_count: 1,
                             stage_flags: vk::ShaderStageFlags::FRAGMENT,
@@ -336,5 +371,9 @@ impl Base {
     }
 }
 
-/// The pixel format we render in
+/// The pixel format we render the final output in (swapchain)
 pub const COLOR_FORMAT: vk::Format = vk::Format::B8G8R8A8_SRGB;
+
+/// The pixel format for the intermediate scene color buffer
+/// Using SRGB for proper gamma handling, with alpha for translucency
+pub const SCENE_COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;

@@ -4,9 +4,13 @@
 
 layout(location = 0) in vec2 texcoords;
 
-layout(location = 0) out vec4 fog;
+layout(location = 0) out vec4 final_color;
 
-layout(input_attachment_index=0, set=0, binding=1) uniform subpassInput depth;
+// Input attachments for composite pass (subpass 1)
+// Scene color: RGBA with accumulated translucency in alpha
+layout(input_attachment_index = 0, set = 0, binding = 1) uniform subpassInput scene_color;
+// Depth buffer for fog calculations
+layout(input_attachment_index = 1, set = 0, binding = 2) uniform subpassInput depth;
 
 // ============================================================================
 // Procedural Sky with Hyperbolic Angular Distortion
@@ -327,6 +331,10 @@ vec3 proceduralSky(vec3 worldDir, vec3 worldUp, vec3 worldNorth) {
 }
 
 void main() {
+    // Read scene color (RGB = scene, A = coverage/opacity)
+    vec4 scene = subpassLoad(scene_color);
+    float scene_alpha = scene.a;  // How much geometry covers this pixel
+    
     // Reconstruct view-space position from depth
     vec4 clip_pos = vec4(texcoords * 2.0 - 1.0, subpassLoad(depth).x, 1.0);
     vec4 scaled_view_pos = inverse_projection * clip_pos;
@@ -348,11 +356,22 @@ void main() {
     
     // Exponential^k fog: visibility decreases with distance
     float visibility = exp(-pow(dist * fog_density, 5));
-    float fog_alpha = 1.0 - visibility;
+    float fog_factor = 1.0 - visibility;
 
-    // Dither fog alpha to reduce visible banding
+    // Dither fog factor to reduce visible banding
     float dither = (hash21(gl_FragCoord.xy + time * 60.0) - 0.5) / 255.0;
-    fog_alpha = clamp(fog_alpha + dither, 0.0, 1.0);
+    fog_factor = clamp(fog_factor + dither, 0.0, 1.0);
     
-    fog = vec4(sky_color, fog_alpha);
+    // Composite scene over sky with fog:
+    // 1. Apply fog to scene color: blend scene toward sky based on distance
+    vec3 fogged_scene = mix(scene.rgb, sky_color, fog_factor);
+    
+    // 2. Blend fogged scene over sky based on scene alpha (geometry coverage)
+    //    Where scene_alpha = 0 (no geometry), we see pure sky
+    //    Where scene_alpha = 1 (fully covered), we see fogged scene
+    //    Where scene_alpha is partial (translucent), we see a blend
+    vec3 result = mix(sky_color, fogged_scene, scene_alpha);
+    
+    // Output final composited color
+    final_color = vec4(result, 1.0);
 }

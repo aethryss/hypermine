@@ -387,6 +387,7 @@ impl Window {
             frame_id: u32,
             extent: vk::Extent2D,
             buffer: vk::Framebuffer,
+            scene_color_view: vk::ImageView,
             depth_view: vk::ImageView,
             present: vk::Semaphore,
             frustum: Frustum,
@@ -434,6 +435,7 @@ impl Window {
                         frame_id,
                         extent,
                         buffer: frame.buffer,
+                        scene_color_view: frame.scene_color_view,
                         depth_view: frame.depth_view,
                         present: frame.present,
                         frustum,
@@ -450,6 +452,7 @@ impl Window {
                 self.sim.as_mut(),
                 paint,
                 frame_data.buffer,
+                frame_data.scene_color_view,
                 frame_data.depth_view,
                 frame_data.extent,
                 frame_data.present,
@@ -794,6 +797,48 @@ impl SwapchainState {
                         )
                         .unwrap();
                     gfx.set_name(view, cstr!("swapchain"));
+                    
+                    // Scene color buffer - intermediate render target with alpha for translucency
+                    let scene_color = DedicatedImage::new(
+                        device,
+                        &gfx.memory_properties,
+                        &vk::ImageCreateInfo::default()
+                            .image_type(vk::ImageType::TYPE_2D)
+                            .format(super::base::SCENE_COLOR_FORMAT)
+                            .extent(vk::Extent3D {
+                                width: extent.width,
+                                height: extent.height,
+                                depth: 1,
+                            })
+                            .mip_levels(1)
+                            .array_layers(1)
+                            .samples(vk::SampleCountFlags::TYPE_1)
+                            .usage(
+                                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                                    | vk::ImageUsageFlags::INPUT_ATTACHMENT,
+                            ),
+                    );
+                    gfx.set_name(scene_color.handle, cstr!("scene_color"));
+                    gfx.set_name(scene_color.memory, cstr!("scene_color"));
+                    let scene_color_view = device
+                        .create_image_view(
+                            &vk::ImageViewCreateInfo::default()
+                                .image(scene_color.handle)
+                                .view_type(vk::ImageViewType::TYPE_2D)
+                                .format(super::base::SCENE_COLOR_FORMAT)
+                                .subresource_range(vk::ImageSubresourceRange {
+                                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                                    base_mip_level: 0,
+                                    level_count: 1,
+                                    base_array_layer: 0,
+                                    layer_count: 1,
+                                }),
+                            None,
+                        )
+                        .unwrap();
+                    gfx.set_name(scene_color_view, cstr!("scene_color"));
+
+                    // Depth buffer
                     let depth = DedicatedImage::new(
                         device,
                         &gfx.memory_properties,
@@ -836,13 +881,16 @@ impl SwapchainState {
                     gfx.set_name(present, cstr!("present"));
                     Frame {
                         view,
+                        scene_color,
+                        scene_color_view,
                         depth,
                         depth_view,
+                        // Framebuffer attachments: [swapchain, scene_color, depth]
                         buffer: device
                             .create_framebuffer(
                                 &vk::FramebufferCreateInfo::default()
                                     .render_pass(gfx.render_pass)
-                                    .attachments(&[view, depth_view])
+                                    .attachments(&[view, scene_color_view, depth_view])
                                     .width(extent.width)
                                     .height(extent.height)
                                     .layers(1),
@@ -872,8 +920,10 @@ impl Drop for SwapchainState {
             for frame in &mut self.frames {
                 device.destroy_framebuffer(frame.buffer, None);
                 device.destroy_image_view(frame.depth_view, None);
+                device.destroy_image_view(frame.scene_color_view, None);
                 device.destroy_image_view(frame.view, None);
                 frame.depth.destroy(device);
+                frame.scene_color.destroy(device);
                 device.destroy_semaphore(frame.present, None);
             }
             self.swapchain_fn.destroy_swapchain(self.handle, None);
@@ -884,11 +934,15 @@ impl Drop for SwapchainState {
 struct Frame {
     /// Image view for an entire swapchain image
     view: vk::ImageView,
+    /// Scene color buffer - intermediate render target with alpha
+    scene_color: DedicatedImage,
+    /// View thereof
+    scene_color_view: vk::ImageView,
     /// Depth buffer to use when rendering to this image
     depth: DedicatedImage,
     /// View thereof
     depth_view: vk::ImageView,
-    /// Framebuffer referencing `view` and `depth_view`
+    /// Framebuffer referencing `view`, `scene_color_view`, and `depth_view`
     buffer: vk::Framebuffer,
     /// Semaphore used to ensure the frame isn't presented until rendering completes
     present: vk::Semaphore,

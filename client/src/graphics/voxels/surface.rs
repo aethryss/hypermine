@@ -325,17 +325,19 @@ impl Surface {
             let color_blend_state_cutout =
                 vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_cutout);
 
-            // Translucent: alpha blending for RGB colors, write alpha=1.0 for fog pass
+            // Translucent: alpha blending for RGB colors, accumulate alpha properly
             // Color blending: final_rgb = src_rgb * src_alpha + dst_rgb * (1 - src_alpha)
-            // Alpha: just overwrite with 1.0 (no blending) so fog knows there's geometry
+            // Alpha blending: final_alpha = src_alpha + dst_alpha * (1 - src_alpha)
+            //   This gives us "coverage" - how much of this pixel is covered by geometry
+            //   Alpha=0 means pure sky visible, alpha=1 means fully covered
             let color_blend_translucent = [vk::PipelineColorBlendAttachmentState {
                 blend_enable: vk::TRUE,
                 src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
                 dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
                 color_blend_op: vk::BlendOp::ADD,
-                // Alpha: output = 1*1 + 0*dst = 1.0 (fragment shader outputs alpha=1.0 for translucent)
+                // Alpha: final = srcA + dstA * (1 - srcA) = srcA * 1 + dstA * (1 - srcA)
                 src_alpha_blend_factor: vk::BlendFactor::ONE,
-                dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+                dst_alpha_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
                 alpha_blend_op: vk::BlendOp::ADD,
                 // Write all channels including alpha
                 color_write_mask: vk::ColorComponentFlags::R
