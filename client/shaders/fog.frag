@@ -63,6 +63,61 @@ float fbm(vec3 p) {
     return value;
 }
 
+bool cloudCellExists(ivec2 cell) {
+    // Deterministic Minecraft-like cloud footprint: a coarse cluster mask and a local mask.
+    // Using integer cell coordinates ensures the top/bottom faces share the exact same pattern.
+    float localHash = hash21(vec2(cell));
+    ivec2 clusterCell = cell / 6;
+    float clusterHash = hash21(vec2(clusterCell) + vec2(42.0, 17.0));
+    return (clusterHash > 0.55) && (localHash > 0.35);
+}
+
+vec3 cloudFaceColor(
+    vec3 faceNormal,
+    vec3 worldUp,
+    vec3 east,
+    vec3 north,
+    vec3 sunDir,
+    vec3 zenithColor,
+    vec3 horizonColor,
+    vec3 nadirColor
+) {
+    float upDot = dot(faceNormal, worldUp);
+    if (upDot > 0.9) {
+        // Top: brightest
+        return vec3(1.0, 1.0, 1.0);
+    }
+    if (upDot < -0.9) {
+        // Bottom: darkest
+        return vec3(0.70, 0.72, 0.75);
+    }
+
+    // Sides: shaded by sky (gradient + a bit of sun), similar to block ambient light.
+    float h = clamp(dot(faceNormal, worldUp), -1.0, 1.0);
+    vec3 skyAmb;
+    if (h >= 0.0) {
+        float t = sqrt(h);
+        skyAmb = mix(horizonColor, zenithColor, t);
+    } else {
+        float t = sqrt(-h);
+        skyAmb = mix(horizonColor, nadirColor, t);
+    }
+
+    // Make side faces strongly directional: a bright sun-facing side and a noticeably darker opposite side.
+    float sunLambert = max(0.0, dot(faceNormal, sunDir));
+    float sunSpec = pow(sunLambert, 48.0);
+
+    // Convert sky ambient color to a scalar intensity to keep clouds mostly white.
+    float skyLum = dot(skyAmb, vec3(0.2126, 0.7152, 0.0722));
+    float ambientI = 0.30 + 0.40 * skyLum;
+
+    vec3 base = vec3(0.92, 0.94, 0.97);
+    vec3 sunColor = vec3(1.0, 0.95, 0.8);
+
+    vec3 col = base * ambientI + sunColor * (0.75 * sunLambert + 0.45 * sunSpec);
+    return clamp(col, 0.0, 1.0);
+}
+
 // Apply hyperbolic angular distortion to a direction
 // In hyperbolic space, directions near the horizon are "compressed"
 // compared to Euclidean projection. This warps the sky to feel more
@@ -142,57 +197,130 @@ vec3 proceduralSky(vec3 worldDir, vec3 worldUp, vec3 worldNorth) {
     float sunGlow = pow(max(0.0, sunDot), 8.0) * 0.3;   // Soft glow
     vec3 sunColor = vec3(1.0, 0.95, 0.8);
     skyColor += sunColor * (sunIntensity + sunGlow);
-    
-    // === Minecraft-style Pixelated Clouds ===
-    // Blocky clouds on a flat infinite plane at a fixed height above the viewer
-    float cloudPlaneHeight = 128.0; // World-space height of cloud plane
-    if (height > 0.01) {
-        // Ray-plane intersection: plane is at y = cloudPlaneHeight (in world up direction)
-        // Ray: origin = 0, direction = dir
-        // Plane: dot(p, worldUp) = cloudPlaneHeight
-        // Intersection t: t * dot(dir, worldUp) = cloudPlaneHeight
-        // So t = cloudPlaneHeight / height (since height = dot(dir, worldUp))
-        float t = cloudPlaneHeight / height;
-        
-        // Intersection point on the cloud plane
-        vec3 cloudPoint = dir * t;
-        
-        // Project to 2D coordinates on the plane using east/north basis
-        float u = dot(cloudPoint, east);
-        float v = dot(cloudPoint, north);
-        
-        // Scale down and animate - clouds drift slowly eastward
-        float cloudScale = 0.02; // Controls cloud size (smaller = larger clouds)
-        vec2 cloudUV = vec2(u, v) * cloudScale + vec2(time * 0.5, 0.0);
-        
-        // === Pixelation: quantize to grid ===
-        float pixelSize = 1.0; // Size of each cloud "pixel" in cloud UV space
-        vec2 pixelUV = floor(cloudUV / pixelSize);
-        
-        // Simple deterministic hash for cloud pattern
-        float cloudHash = hash21(pixelUV);
-        
-        // Create blocky cloud shapes using threshold
-        // Use a second hash at coarser scale for cloud clusters
-        vec2 clusterUV = floor(cloudUV / (pixelSize * 6.0));
-        float clusterHash = hash21(clusterUV + vec2(42.0, 17.0));
-        
-        // Cloud exists if both cluster and local hash pass threshold
-        bool inCloud = (clusterHash > 0.55) && (cloudHash > 0.35);
-        
-        if (inCloud) {
-            // Distance-based fade: clouds far away should fade into sky
-            float cloudDistance = length(vec2(u, v));
-            float distanceFade = 1.0 - smoothstep(3000.0, 6000.0, cloudDistance);
-            
-            // Flat white cloud color
-            vec3 cloudColor = vec3(1.0, 1.0, 1.0);
-            
-            // Fade clouds near horizon to blend with fog
-            float cloudFade = smoothstep(0.01, 0.15, height) * distanceFade;
-            
-            skyColor = mix(skyColor, cloudColor, cloudFade);
+
+    // === Minecraft-style 3D Pixelated Clouds ===
+    // Render clouds as an extruded voxel grid (a slab with actual side faces).
+    float cloudTopHeight = 128.0;   // Height above the viewer, along worldUp
+    float cloudThickness = 8.0;
+    float cloudBottomHeight = cloudTopHeight - cloudThickness;
+
+    float cloudScale = 0.02;        // Smaller = larger clouds
+    float pixelSize = 1.0;          // In cloud-UV space
+    vec2 cloudDrift = vec2(time * 0.05, 0.0);
+
+    bool hitCloud = false;
+    float tHit = 0.0;
+    vec3 hitNormal = vec3(0.0);
+
+    // Only render when looking upward into the cloud layer.
+    float dy = height;
+    if (dy > 0.001) {
+        float tEnter = cloudBottomHeight / dy;
+        float tExit = cloudTopHeight / dy;
+
+        if (tExit > 0.0) {
+            tEnter = max(tEnter, 0.0);
+
+            vec2 dirUV = vec2(dot(dir, east), dot(dir, north)) * cloudScale;
+            vec2 uv = dirUV * tEnter + cloudDrift;
+            ivec2 cell = ivec2(floor(uv / pixelSize));
+
+            // If we enter the slab inside a filled cell, we hit the bottom face.
+            if (cloudCellExists(cell)) {
+                hitCloud = true;
+                tHit = tEnter;
+                hitNormal = -worldUp;
+            } else {
+                // 2D DDA through the cloud grid while we are inside the slab.
+                ivec2 step = ivec2(sign(dirUV));
+                float t = tEnter;
+
+                float tMaxX;
+                float tMaxY;
+                float tDeltaX;
+                float tDeltaY;
+
+                if (abs(dirUV.x) < 1e-6) {
+                    step.x = 0;
+                    tMaxX = INFINITY;
+                    tDeltaX = INFINITY;
+                } else {
+                    float cellMin = float(cell.x) * pixelSize;
+                    float cellMax = (float(cell.x) + 1.0) * pixelSize;
+                    float nextBoundary = (dirUV.x > 0.0) ? cellMax : cellMin;
+                    tMaxX = t + (nextBoundary - uv.x) / dirUV.x;
+                    tDeltaX = pixelSize / abs(dirUV.x);
+                }
+
+                if (abs(dirUV.y) < 1e-6) {
+                    step.y = 0;
+                    tMaxY = INFINITY;
+                    tDeltaY = INFINITY;
+                } else {
+                    float cellMin = float(cell.y) * pixelSize;
+                    float cellMax = (float(cell.y) + 1.0) * pixelSize;
+                    float nextBoundary = (dirUV.y > 0.0) ? cellMax : cellMin;
+                    tMaxY = t + (nextBoundary - uv.y) / dirUV.y;
+                    tDeltaY = pixelSize / abs(dirUV.y);
+                }
+
+                const int MAX_STEPS = 96;
+                for (int i = 0; i < MAX_STEPS; i++) {
+                    // Step to next cell boundary.
+                    if (tMaxX < tMaxY) {
+                        if (step.x == 0) {
+                            break;
+                        }
+                        t = tMaxX;
+                        tMaxX += tDeltaX;
+                        cell.x += step.x;
+                        hitNormal = -sign(dirUV.x) * east;
+                    } else {
+                        if (step.y == 0) {
+                            break;
+                        }
+                        t = tMaxY;
+                        tMaxY += tDeltaY;
+                        cell.y += step.y;
+                        hitNormal = -sign(dirUV.y) * north;
+                    }
+
+                    if (t > tExit) {
+                        break;
+                    }
+
+                    if (cloudCellExists(cell)) {
+                        hitCloud = true;
+                        tHit = t;
+                        break;
+                    }
+                }
+            }
         }
+    }
+
+    if (hitCloud) {
+        vec3 hitPoint = dir * tHit;
+        vec3 cloudColor = cloudFaceColor(
+            normalize(hitNormal),
+            worldUp,
+            east,
+            north,
+            sunDir,
+            zenithColor,
+            horizonColor,
+            nadirColor
+        );
+
+        // Distance-based fade.
+        float uWorld = dot(hitPoint, east);
+        float vWorld = dot(hitPoint, north);
+        float cloudDistance = length(vec2(uWorld, vWorld));
+        float distanceFade = 1.0 - smoothstep(3000.0, 6000.0, cloudDistance);
+
+        // Fade near horizon (only above horizon for this layer).
+        float cloudFade = smoothstep(0.01, 0.15, dy) * distanceFade;
+        skyColor = mix(skyColor, cloudColor, cloudFade);
     }
     
     return skyColor;
