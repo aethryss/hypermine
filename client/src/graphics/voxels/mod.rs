@@ -1,5 +1,6 @@
 mod surface;
 pub mod surface_extraction;
+mod skylight;
 
 #[cfg(test)]
 mod tests;
@@ -25,6 +26,7 @@ use common::{
 
 use surface::Surface;
 use surface_extraction::{DrawBuffer, ExtractTask, ScratchBuffer, SurfaceExtraction};
+use skylight::SkylightShadow;
 
 pub struct Voxels {
     config: Arc<Config>,
@@ -33,6 +35,7 @@ pub struct Voxels {
     surfaces: DrawBuffer,
     states: LruSlab<SurfaceState>,
     draw: Surface,
+    skylight: SkylightShadow,
     max_chunks: u32,
 }
 
@@ -57,7 +60,20 @@ impl Voxels {
             MAX_CHUNKS
         };
         let surfaces = DrawBuffer::new(gfx, max_chunks, dimension);
-        let draw = Surface::new(gfx, loader, &surfaces);
+        // Skylight shadow-map uses a fixed resolution; keep it constant regardless of window size.
+        let skylight = SkylightShadow::new(
+            gfx,
+            &surfaces,
+            vk::Extent2D {
+                width: 1024,
+                height: 1024,
+            },
+        );
+
+        let mut draw = Surface::new(gfx, loader, &surfaces);
+        unsafe {
+            draw.set_skylight_shadow_map(&*gfx.device, skylight.depth_view(), skylight.sampler());
+        }
         let surface_extraction = SurfaceExtraction::new(gfx);
         let extraction_scratch = surface_extraction::ScratchBuffer::new(
             gfx,
@@ -73,7 +89,32 @@ impl Voxels {
             surfaces,
             states: LruSlab::with_capacity(max_chunks),
             draw,
+            skylight,
             max_chunks,
+        }
+    }
+
+    /// Render the skylight shadow map (depth-only) for the currently drawn chunks.
+    ///
+    /// Must run before the main voxel pass, in the same command buffer, so the voxel
+    /// fragment shader can sample the resulting depth texture.
+    pub unsafe fn draw_skylight_shadow(
+        &mut self,
+        device: &Device,
+        common_ds: vk::DescriptorSet,
+        frame: &Frame,
+        cmd: vk::CommandBuffer,
+    ) {
+        unsafe {
+            self.skylight.draw(
+                device,
+                common_ds,
+                self.surfaces.dimension(),
+                cmd,
+                &frame.surface,
+                &self.surfaces,
+                &frame.drawn,
+            );
         }
     }
 
@@ -269,6 +310,7 @@ impl Voxels {
             self.extraction_scratch.destroy(device);
             self.surfaces.destroy(device);
             self.draw.destroy(device);
+            self.skylight.destroy(device);
         }
     }
 }

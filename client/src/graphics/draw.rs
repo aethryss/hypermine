@@ -3,6 +3,11 @@ use std::time::Instant;
 
 use ash::vk;
 use common::traversal;
+use common::{
+    dodeca,
+    graph::NodeId,
+    math::{MDirection, MIsometry, MPoint, MVector},
+};
 use lahar::Staged;
 use metrics::histogram;
 
@@ -427,6 +432,10 @@ impl Draw {
             };
             histogram!("frame.cpu.nearby_nodes").record(nearby_nodes_started.elapsed());
 
+            // Precompute skylight uniforms while we still have nearby node transforms.
+            let (skylight_view_projection, skylight_params) =
+                compute_skylight_uniforms(sim.as_deref(), &view, &nearby_nodes);
+
             if let (Some(voxels), Some(sim)) = (self.voxels.as_mut(), sim.as_mut()) {
                 voxels.prepare(
                     device,
@@ -450,6 +459,16 @@ impl Draw {
             );
             self.buffer_barriers.clear();
             self.image_barriers.clear();
+
+            // Skylight shadow-map prepass (depth-only) so voxel shading can sample it.
+            if let Some(ref mut voxels) = self.voxels {
+                voxels.draw_skylight_shadow(
+                    device,
+                    state.common_ds,
+                    state.voxels.as_ref().unwrap(),
+                    cmd,
+                );
+            }
 
             device.cmd_begin_render_pass(
                 cmd,
@@ -607,6 +626,8 @@ impl Draw {
                 view_projection,
                 inverse_projection: *projection.inverse().matrix(),
                 inverse_view,
+                skylight_view_projection,
+                skylight_params,
                 world_up,
                 world_north,
                 fog_density: fog::density(self.cfg.local_simulation.fog_distance, 1e-3, 5.0),
@@ -646,6 +667,112 @@ impl Draw {
             }
         }
     }
+}
+
+fn compute_skylight_uniforms(
+    sim: Option<&Sim>,
+    view: &Position,
+    nearby_nodes: &[(NodeId, MIsometry<f32>)],
+) -> (na::Matrix4<f32>, na::Vector4<f32>) {
+    // Default: disabled skylight
+    let mut skylight_params = na::Vector4::new(0.0, 0.0, 0.001, 0.0);
+    let mut skylight_view_projection = na::Matrix4::identity();
+
+    let Some(sim) = sim else {
+        return (skylight_view_projection, skylight_params);
+    };
+    if !sim.graph.contains(view.node) {
+        return (skylight_view_projection, skylight_params);
+    }
+    let node_state = match sim.graph[view.node].state.as_ref() {
+        Some(s) => s,
+        None => return (skylight_view_projection, skylight_params),
+    };
+
+    // View-from-node (camera transform). This matches how `view_projection` is built.
+    let view_from_node = view.local.inverse();
+
+    // Down direction is the surface normal pointing into terrain.
+    // Prefer the actual Minkowski-space plane normal so the Fermi frame stays consistent with
+    // the hyperbolic horizon geometry.
+    let down_in_node: MVector<f32> = -node_state.up_direction();
+    let down_in_view: MVector<f32> = view_from_node * down_in_node;
+
+    // The plane normal should be spacelike (direction-like), but in rare numerical/edge cases it
+    // can become non-direction-like. Guard to avoid panicking.
+    let down_dir: MDirection<f32> = if down_in_view.mip(&down_in_view) > 1.0e-6 {
+        down_in_view.normalized_direction()
+    } else {
+        // Fallback: use the engine's robust relative-up (Euclidean XYZ normalization).
+        // This is only used when the Minkowski normal becomes degenerate.
+        let Some(up_view) = sim.graph.get_relative_up(view) else {
+            return (skylight_view_projection, skylight_params);
+        };
+        let down_view = na::UnitVector3::new_unchecked(-up_view.into_inner());
+        down_view.into()
+    };
+
+    // Build a Minkowski isometry that maps `down_dir` -> +X.
+    // Using two reflections: R_b * R_(a+b) where a maps to b.
+    // If `a` is almost `-b`, then `a+b` is near zero and cannot be normalized; handle that case
+    // by reflecting about `b` directly (which maps -b to b).
+    let target = MDirection::x();
+    let sum: MVector<f32> = down_dir.as_ref() + target.as_ref();
+    let fermi_from_view = if sum.mip(&sum) <= 1.0e-6 {
+        common::math::MIsometry::reflection(&target)
+    } else {
+        let sum_dir = sum.normalized_direction();
+        common::math::MIsometry::reflection(&target) * common::math::MIsometry::reflection(&sum_dir)
+    };
+
+    // Determine ortho bounds in Klein coords by scanning the node centers we will render.
+    // Inflate by the node bounding sphere radius converted to Klein radius.
+    let mut max_u = 0.25f32;
+    let mut max_v = 0.25f32;
+    for &(_node, node_to_viewnode) in nearby_nodes {
+        let p_view = view_from_node * node_to_viewnode * MPoint::origin();
+        let p_fermi = fermi_from_view * p_view;
+        let w = p_fermi.w.max(1.0e-6);
+        max_u = max_u.max((p_fermi.y / w).abs());
+        max_v = max_v.max((p_fermi.z / w).abs());
+    }
+    let inflate = libm::tanhf(dodeca::BOUNDING_SPHERE_RADIUS);
+    max_u = (max_u + inflate).min(0.95).max(0.05);
+    max_v = (max_v + inflate).min(0.95).max(0.05);
+
+    // Fermi orthographic projection in Klein coords:
+    // ndc_x = (y/w) / max_u
+    // ndc_y = (z/w) / max_v
+    // ndc_z = 0.5 * (x/w + 1.0)  in [0, 1]
+    // Implemented projectively with clip_w = w.
+    let p = na::Matrix4::new(
+        0.0,
+        1.0 / max_u,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0 / max_v,
+        0.0,
+        0.5,
+        0.0,
+        0.0,
+        0.5,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+
+    skylight_view_projection =
+        p * na::Matrix4::from(fermi_from_view) * na::Matrix4::from(view_from_node);
+
+    // Defaults: moderately bright skylight, strong shadows.
+    skylight_params.x = 0.85; // intensity
+    skylight_params.y = 0.85; // shadow strength
+    skylight_params.z = 0.0015; // bias
+
+    (skylight_view_projection, skylight_params)
 }
 
 impl Drop for Draw {
@@ -716,6 +843,10 @@ struct Uniforms {
     inverse_projection: na::Matrix4<f32>,
     /// Maps view space to world space (camera orientation)
     inverse_view: na::Matrix4<f32>,
+
+    /// Skylight shadow-map projection + parameters
+    skylight_view_projection: na::Matrix4<f32>,
+    skylight_params: na::Vector4<f32>,
     /// World up direction in view space (xyz, w unused for alignment)
     world_up: na::Vector4<f32>,
     /// World north direction in view space (xyz, w unused for alignment)

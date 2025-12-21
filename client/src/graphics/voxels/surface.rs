@@ -26,6 +26,8 @@ pub struct Surface {
     descriptor_sets: [vk::DescriptorSet; TRANSPARENCY_CLASS_COUNT],
     colors: Asset<DedicatedImage>,
     colors_view: vk::ImageView,
+    skylight_shadow_view: vk::ImageView,
+    skylight_shadow_sampler: vk::Sampler,
     linear_sampler: vk::Sampler,
 }
 
@@ -62,6 +64,14 @@ impl Surface {
                             stage_flags: vk::ShaderStageFlags::FRAGMENT,
                             ..Default::default()
                         },
+                        // Skylight shadow map (depth texture)
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 2,
+                            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                            ..Default::default()
+                        },
                     ]),
                     None,
                 )
@@ -74,6 +84,10 @@ impl Surface {
                         .pool_sizes(&[
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::STORAGE_BUFFER,
+                                descriptor_count: TRANSPARENCY_CLASS_COUNT as u32,
+                            },
+                            vk::DescriptorPoolSize {
+                                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                                 descriptor_count: TRANSPARENCY_CLASS_COUNT as u32,
                             },
                             vk::DescriptorPoolSize {
@@ -425,7 +439,35 @@ impl Surface {
                 descriptor_sets,
                 colors,
                 colors_view: vk::ImageView::null(),
+                skylight_shadow_view: vk::ImageView::null(),
+                skylight_shadow_sampler: vk::Sampler::null(),
                 linear_sampler: gfx.linear_sampler,
+            }
+        }
+    }
+
+    pub unsafe fn set_skylight_shadow_map(
+        &mut self,
+        device: &Device,
+        shadow_view: vk::ImageView,
+        shadow_sampler: vk::Sampler,
+    ) {
+        unsafe {
+            self.skylight_shadow_view = shadow_view;
+            self.skylight_shadow_sampler = shadow_sampler;
+            for &ds in &self.descriptor_sets {
+                device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet::default()
+                        .dst_set(ds)
+                        .dst_binding(2)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&[vk::DescriptorImageInfo {
+                            sampler: self.skylight_shadow_sampler,
+                            image_view: self.skylight_shadow_view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        }])],
+                    &[],
+                );
             }
         }
     }
@@ -568,6 +610,10 @@ impl Frame {
 
     pub fn transforms_mut(&mut self) -> &mut [na::Matrix4<f32>] {
         &mut self.transforms
+    }
+
+    pub fn transforms_buffer(&self) -> vk::Buffer {
+        self.transforms.buffer()
     }
 }
 

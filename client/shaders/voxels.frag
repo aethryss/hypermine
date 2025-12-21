@@ -1,12 +1,16 @@
 #version 450
 
+#include "common.h"
+
 layout(location = 0) in vec3 texcoords;
 layout(location = 1) in float occlusion;
 layout(location = 2) in flat uint texture_index;
 layout(location = 3) in vec3 light_color;
+layout(location = 4) in flat vec4 skylight_shadow_clip;
 layout(location = 0) out vec4 color;
 
 layout(set = 1, binding = 1) uniform sampler2D terrain;
+layout(set = 1, binding = 2) uniform sampler2D skylight_shadow;
 
 // Specialization constants for transparency handling
 // enable_alpha_test: if true, discard pixels with alpha < alpha_cutoff
@@ -52,11 +56,26 @@ void main() {
     if (enable_alpha_test && texColor.a < alpha_cutoff) {
         discard;
     }
+
+    // Skylight shadowing (shadow-map style).
+    // The shadow map is rendered in a Fermi-orthographic projection aligned with the local horizon plane.
+    vec3 shadow_ndc = skylight_shadow_clip.xyz / skylight_shadow_clip.w;
+    vec2 shadow_uv = shadow_ndc.xy * 0.5 + 0.5;
+    float shadow_depth = 1.0;
+    bool shadow_valid = all(greaterThanEqual(shadow_uv, vec2(0.0))) && all(lessThanEqual(shadow_uv, vec2(1.0)));
+    shadow_valid = shadow_valid && (shadow_ndc.z >= 0.0) && (shadow_ndc.z <= 1.0);
+    if (shadow_valid) {
+        shadow_depth = texture(skylight_shadow, shadow_uv).r;
+    }
+    float bias = skylight_params.z;
+    bool in_shadow = shadow_valid && ((shadow_ndc.z - bias) > shadow_depth);
+    float shadow_factor = in_shadow ? (1.0 - skylight_params.y) : 1.0;
+    vec3 skylight = vec3(skylight_params.x) * shadow_factor;
     
     // Calculate effective light: combine block light with ambient
     // Block light color is [0,1] per channel from 4-bit values
     // Add ambient to ensure areas are never completely dark
-    vec3 effective_light = max(light_color, AMBIENT_LIGHT_COLOR);
+    vec3 effective_light = max(light_color + skylight, AMBIENT_LIGHT_COLOR);
     
     // Apply lighting and occlusion
     // effective_light provides the light color/intensity
