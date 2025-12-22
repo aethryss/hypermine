@@ -69,7 +69,7 @@ impl Surface {
                             binding: 2,
                             descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                             descriptor_count: 1,
-                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                            stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                             ..Default::default()
                         },
                     ]),
