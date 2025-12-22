@@ -18,6 +18,7 @@ layout(set = 1, binding = 2) uniform sampler2D skylight_shadow;
 layout(constant_id = 0) const bool enable_alpha_test = false;
 layout(constant_id = 1) const float alpha_cutoff = 0.5;
 
+
 // Minimum ambient light color (prevents completely dark areas).
 //
 // Note: the render targets and textures are sRGB, so shader math happens in *linear* space.
@@ -65,7 +66,33 @@ void main() {
     bool shadow_valid = all(greaterThanEqual(shadow_uv, vec2(0.0))) && all(lessThanEqual(shadow_uv, vec2(1.0)));
     shadow_valid = shadow_valid && (shadow_ndc.z >= 0.0) && (shadow_ndc.z <= 1.0);
     if (shadow_valid) {
-        shadow_depth = texture(skylight_shadow, shadow_uv).r;
+        // Hard "shrink" of the shadow silhouette:
+        // take the maximum depth in a tiny neighborhood and do a hard compare.
+        //
+        // Intuition: along a shadow edge, adjacent texels may alternate between
+        // "occluder" (smaller depth) and "lit" (larger depth). Using max depth
+        // biases toward the lit decision, effectively eroding the shadow by ~1 texel
+        // without blending/softening the edge.
+        // Resolution-aware: derive texel coordinates from the actual shadow-map extent.
+        ivec2 size_i = textureSize(skylight_shadow, 0);
+        vec2 size = vec2(size_i);
+
+        // Convert UV to a base texel coordinate (clamped).
+        ivec2 tc = ivec2(floor(shadow_uv * size));
+        tc = clamp(tc, ivec2(0), size_i - ivec2(1));
+
+        ivec2 tc_px = min(tc + ivec2(1, 0), size_i - ivec2(1));
+        ivec2 tc_nx = max(tc + ivec2(-1, 0), ivec2(0));
+        ivec2 tc_py = min(tc + ivec2(0, 1), size_i - ivec2(1));
+        ivec2 tc_ny = max(tc + ivec2(0, -1), ivec2(0));
+
+        float d0 = texelFetch(skylight_shadow, tc, 0).r;
+        float d1 = texelFetch(skylight_shadow, tc_px, 0).r;
+        float d2 = texelFetch(skylight_shadow, tc_nx, 0).r;
+        float d3 = texelFetch(skylight_shadow, tc_py, 0).r;
+        float d4 = texelFetch(skylight_shadow, tc_ny, 0).r;
+
+        shadow_depth = max(d0, max(max(d1, d2), max(d3, d4)));
     }
     float bias = skylight_params.z;
     bool in_shadow = shadow_valid && ((shadow_ndc.z - bias) > shadow_depth);
