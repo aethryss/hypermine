@@ -785,8 +785,13 @@ fn compute_skylight_uniforms(
         max_v = max_v.max((v.z / w).abs());
     }
     let inflate = libm::tanhf(dodeca::BOUNDING_SPHERE_RADIUS);
-    max_u = (max_u + inflate).min(0.95).max(0.05);
-    max_v = (max_v + inflate).min(0.95).max(0.05);
+    // NOTE: (y/w, z/w) are Klein-model coordinates and approach 1.0 at infinity.
+    // Clamping too aggressively here causes the shadow-map to stop covering distant
+    // (but still rendered) chunks. We keep a tiny safety margin below 1.0 to avoid
+    // numerical blow-ups near the ideal boundary.
+    const KLEIN_MAX: f32 = 0.9995;
+    max_u = (max_u + inflate).min(KLEIN_MAX).max(0.05);
+    max_v = (max_v + inflate).min(KLEIN_MAX).max(0.05);
 
     skylight_bounds.x = max_u;
     skylight_bounds.y = max_v;

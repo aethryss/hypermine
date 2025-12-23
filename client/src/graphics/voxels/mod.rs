@@ -48,17 +48,72 @@ impl Voxels {
         frames: u32,
         transparency_map: &TransparencyMap,
     ) -> Self {
-        let max_faces = 3 * (dimension.pow(3) + dimension.pow(2));
-        let max_supported_chunks = gfx.limits.max_storage_buffer_range / (8 * max_faces);
-        let max_chunks = if MAX_CHUNKS > max_supported_chunks {
-            warn!(
-                "clamping max chunks to {} due to SSBO size limit",
-                max_supported_chunks
-            );
-            max_supported_chunks
+        // The voxel surface buffers can get *very* large for higher chunk dimensions.
+        // We must cap the number of resident chunks based on:
+        // 1) `max_storage_buffer_range` (we bind the whole SSBO as a descriptor range), and
+        // 2) a conservative fraction of device-local memory to avoid VK_ERROR_OUT_OF_DEVICE_MEMORY.
+        //
+        // Keep these constants in sync with `surface_extraction.rs`.
+        const FACE_SIZE: u64 = 12; // bytes per Surface
+        const INDIRECT_SIZE: u64 = 16; // bytes per VkDrawIndirectCommand
+
+        fn round_up(value: u64, alignment: u64) -> u64 {
+            value.div_ceil(alignment) * alignment
+        }
+
+        fn device_local_heap_size(props: &vk::PhysicalDeviceMemoryProperties) -> u64 {
+            let mut max_heap = 0u64;
+            for i in 0..(props.memory_type_count as usize) {
+                let mt = props.memory_types[i];
+                if mt
+                    .property_flags
+                    .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                {
+                    let heap = props.memory_heaps[mt.heap_index as usize];
+                    max_heap = max_heap.max(heap.size);
+                }
+            }
+            max_heap
+        }
+
+        let max_faces = 3u64 * (u64::from(dimension).pow(3) + u64::from(dimension).pow(2));
+        let face_buffer_unit = round_up(
+            max_faces * FACE_SIZE,
+            gfx.limits.min_storage_buffer_offset_alignment as u64,
+        );
+
+        // SSBO range limit (buffer size must be <= maxStorageBufferRange because we bind WHOLE_SIZE).
+        let max_by_range = (gfx.limits.max_storage_buffer_range as u64 / face_buffer_unit).max(1);
+
+        // Conservative VRAM budget: keep voxel buffers to <= 25% of the largest device-local heap.
+        // This avoids hard failures on GPUs with smaller VRAM or when other apps are using VRAM.
+        let heap_bytes = device_local_heap_size(&gfx.memory_properties);
+        let vram_budget = heap_bytes / 4;
+        let classes = surface_extraction::TRANSPARENCY_CLASS_COUNT as u64;
+        let bytes_per_chunk = classes * (face_buffer_unit + INDIRECT_SIZE)
+            + (surface::TRANSFORM_SIZE as u64) /* transforms buffer is separate but scales with count */;
+        let max_by_vram = if bytes_per_chunk > 0 {
+            (vram_budget / bytes_per_chunk).max(1)
         } else {
-            MAX_CHUNKS
+            1
         };
+
+        let mut max_chunks = MAX_CHUNKS as u64;
+        max_chunks = max_chunks.min(max_by_range).min(max_by_vram);
+        let max_chunks = max_chunks.max(1) as u32;
+
+        if max_chunks < MAX_CHUNKS {
+            warn!(
+                max_chunks,
+                max_by_range,
+                max_by_vram,
+                heap_bytes,
+                vram_budget,
+                face_buffer_unit,
+                "clamping max chunks to avoid GPU OOM"
+            );
+        }
+
         let surfaces = DrawBuffer::new(gfx, max_chunks, dimension);
         // Skylight shadow-map uses a fixed resolution; keep it constant regardless of window size.
         let skylight = SkylightShadow::new(
