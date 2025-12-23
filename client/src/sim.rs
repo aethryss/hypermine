@@ -534,6 +534,16 @@ impl Sim {
         pos
     }
 
+    /// View position for shadowing/skylight that ignores camera rotation.
+    ///
+    /// This keeps shadow projections stable when the camera yaws/pitches/rolls.
+    pub fn view_unoriented(&self) -> Position {
+        let mut pos = self.local_character_controller.position();
+        let up = self.graph.get_relative_up(&pos).unwrap();
+        pos.local *= MIsometry::translation_along(&(up.as_ref() * self.cfg.character.eye_height));
+        pos
+    }
+
     /// Get the compass forward direction in position-local space.
     /// This is a stable "north" reference that experiences holonomy naturally but
     /// doesn't rotate when the camera rotates.

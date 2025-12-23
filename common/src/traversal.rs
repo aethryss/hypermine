@@ -114,17 +114,7 @@ pub struct RayTraverser<'a> {
 impl<'a> RayTraverser<'a> {
     pub fn new(graph: &'a Graph, position: Position, ray: &'a Ray, radius: f32) -> Self {
         // Pick the vertex closest to position.local as the vertex of the chunk to use to start collision checking
-        let mut closest_vertex = Vertex::A;
-        let mut closest_vertex_cosh_distance = f32::INFINITY;
-        for vertex in Vertex::iter() {
-            let vertex_cosh_distance =
-                (vertex.node_to_dual() * position.local * MPoint::origin()).w;
-            if vertex_cosh_distance < closest_vertex_cosh_distance {
-                closest_vertex = vertex;
-                closest_vertex_cosh_distance = vertex_cosh_distance;
-            }
-        }
-        let start_vertex = closest_vertex;
+        let start_vertex = closest_vertex_to_position_local(position.local);
 
         let mut visited_chunks = FxHashSet::<ChunkId>::default();
         visited_chunks.insert(ChunkId::new(position.node, start_vertex));
@@ -224,6 +214,22 @@ impl<'a> RayTraverser<'a> {
             }
         }
     }
+}
+
+/// Returns the chunk vertex whose dual origin is closest to `position_local`.
+///
+/// This is used as a stable way to select the "current chunk" within a node.
+pub fn closest_vertex_to_position_local(position_local: MIsometry<f32>) -> Vertex {
+    let mut closest_vertex = Vertex::A;
+    let mut closest_vertex_cosh_distance = f32::INFINITY;
+    for vertex in Vertex::iter() {
+        let vertex_cosh_distance = (vertex.node_to_dual() * position_local * MPoint::origin()).w;
+        if vertex_cosh_distance < closest_vertex_cosh_distance {
+            closest_vertex = vertex;
+            closest_vertex_cosh_distance = vertex_cosh_distance;
+        }
+    }
+    closest_vertex
 }
 
 #[cfg(test)]

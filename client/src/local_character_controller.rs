@@ -35,6 +35,11 @@ impl LocalCharacterController {
         }
     }
 
+    /// Get the current position without applying camera orientation.
+    pub fn position(&self) -> Position {
+        self.position
+    }
+
     pub fn orientation(&self) -> na::UnitQuaternion<f32> {
         self.orientation
     }

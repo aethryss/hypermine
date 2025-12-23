@@ -14,6 +14,7 @@ use metrics::histogram;
 use super::{Base, Fog, Frustum, GltfScene, Meshes, TransparencyMap, Voxels, fog, voxels};
 use crate::{Asset, Config, Loader, Sim};
 use common::SimConfig;
+use common::node::ChunkId;
 use common::proto::{Character, Position};
 
 /// Manages rendering, independent of what is being rendered to
@@ -58,6 +59,17 @@ pub struct Draw {
 
     /// Miscellany
     character_model: Asset<GltfScene>,
+
+    /// Cached skylight uniforms, stabilized by camera chunk.
+    skylight_cache: Option<SkylightCache>,
+}
+
+#[derive(Copy, Clone)]
+struct SkylightCache {
+    anchor_chunk: ChunkId,
+    skylight_view_projection: na::Matrix4<f32>,
+    skylight_params: na::Vector4<f32>,
+    skylight_bounds: na::Vector4<f32>,
 }
 
 /// Maximum number of simultaneous frames in flight
@@ -231,6 +243,8 @@ impl Draw {
                 yakui_vulkan,
 
                 character_model,
+
+                skylight_cache: None,
             }
         }
     }
@@ -432,9 +446,36 @@ impl Draw {
             };
             histogram!("frame.cpu.nearby_nodes").record(nearby_nodes_started.elapsed());
 
-            // Precompute skylight uniforms while we still have nearby node transforms.
+            // Stabilize skylight projection by the camera's current chunk (node + closest vertex).
+            // This prevents shadowmap jitter during movement within a chunk.
+            // Additionally, compute skylight uniforms from an unoriented view so camera rotation
+            // doesn't rotate the shadow projection.
+            let skylight_view = sim
+                .as_deref()
+                .map_or(view, |s| s.view_unoriented());
+
+            let view_vertex = traversal::closest_vertex_to_position_local(skylight_view.local);
+            let anchor_chunk = ChunkId::new(skylight_view.node, view_vertex);
             let (skylight_view_projection, skylight_params, skylight_bounds) =
-                compute_skylight_uniforms(sim.as_deref(), &view, &nearby_nodes);
+                if let Some(cache) = self.skylight_cache
+                    && cache.anchor_chunk == anchor_chunk
+                {
+                    (
+                        cache.skylight_view_projection,
+                        cache.skylight_params,
+                        cache.skylight_bounds,
+                    )
+                } else {
+                    let (svp, sp, sb) =
+                        compute_skylight_uniforms(sim.as_deref(), &skylight_view, &nearby_nodes);
+                    self.skylight_cache = Some(SkylightCache {
+                        anchor_chunk,
+                        skylight_view_projection: svp,
+                        skylight_params: sp,
+                        skylight_bounds: sb,
+                    });
+                    (svp, sp, sb)
+                };
 
             if let (Some(voxels), Some(sim)) = (self.voxels.as_mut(), sim.as_mut()) {
                 voxels.prepare(
