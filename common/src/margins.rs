@@ -736,6 +736,9 @@ mod tests {
                 voxels: VoxelData::Solid(BlockKind::Air.id()),
                 light: crate::light::LightData::default(),
                 light_dirty: false,
+                skylight: crate::skylight::SkylightData::default(),
+                skylight_cache_dirty: false,
+                skylight_surface_dirty: false,
                 surface: None,
                 old_surface: None,
             };

@@ -291,8 +291,10 @@ pub struct ChunkParams {
     /// Orientation of the chunk's up direction in voxel space
     orientation: ChunkOrientation,
     /// Conversion from hyperbolic noise distances to approximate "block" units in the horizontal plane
+    #[cfg_attr(not(test), allow(dead_code))]
     hyper_block_scale: f64,
     /// Conversion from hyperbolic noise distances to "block" units along the vertical axis
+    #[cfg_attr(not(test), allow(dead_code))]
     hyper_vertical_block_scale: f64,
 }
 
@@ -461,11 +463,13 @@ impl ChunkParams {
         hyperbolic_world_chart_coords(self.world_mpoint(local))
     }
 
+    #[cfg(test)]
     /// Hyperbolic noise coordinates scaled to approximate "block" units horizontally.
     fn hyperbolic_block_coords(&self, local: na::Vector3<f32>) -> na::Vector2<f64> {
         self.hyperbolic_noise_coords(local) * self.hyper_block_scale
     }
 
+    #[cfg(test)]
     /// Hyperbolic noise coordinates scaled to approximate "block" units in 3D.
     fn hyperbolic_block_coords_3d(&self, local: na::Vector3<f32>) -> na::Vector3<f64> {
         let coords = self.hyperbolic_noise_coords_3d(local);
@@ -536,6 +540,7 @@ impl ChunkParams {
         (s, s)
     }
 
+    #[cfg(test)]
     fn vertical_density_scale(&self) -> f32 {
         f32::from(self.dimension) / 128.0
     }
@@ -846,6 +851,7 @@ impl From<EnviroFactors> for (f32, f32, f32, f32) {
     }
 }
 struct ChunkIncidentEnviroFactors {
+    #[allow(dead_code)]
     max_elevations: [f32; 8],
     temperatures: [f32; 8],
     rainfalls: [f32; 8],
@@ -902,32 +908,6 @@ fn trilerp<N: na::RealField + Copy>(
     )
 }
 
-/// Serp interpolates between two values v0 and v1 over the interval [0, 1] by yielding
-/// v0 for [0, threshold], v1 for [1-threshold, 1], and linear interpolation in between
-/// such that the overall shape is an S-shaped piecewise function.
-fn serp(v0: f32, v1: f32, t: f32, threshold: f32) -> f32 {
-    if t < threshold {
-        v0
-    } else if t < 1.0 - threshold {
-        let s = (t - threshold) / ((1.0 - threshold) - threshold);
-        v0 * (1.0 - s) + v1 * s
-    } else {
-        v1
-    }
-}
-
-/// Intended to produce a number that is added to elev_raw.
-/// block is a real number, threshold is in (0, strength) via a logistic function
-/// scale controls wavelength and amplitude. It is not 1:1 to the number of blocks in a period.
-/// strength represents extremity of terracing effect. Sensible values are in (0, 0.5).
-/// The greater the value of limiter, the stronger the bias of threshold towards 0.
-fn terracing_diff(elev_raw: f32, block: f32, scale: f32, strength: f32, limiter: f32) -> f32 {
-    let threshold: f32 = strength / (1.0 + libm::powf(2.0, limiter - block));
-    let elev_floor = libm::floorf(elev_raw / scale);
-    let elev_rem = elev_raw / scale - elev_floor;
-    scale * elev_floor + serp(0.0, scale, elev_rem, threshold) - elev_raw
-}
-
 /// Location of the center of a voxel in a unit chunk
 fn voxel_center(dimension: u8, voxel: na::Vector3<u8>) -> na::Vector3<f32> {
     voxel.map(|x| f32::from(x) + 0.5) / f32::from(dimension)
@@ -977,70 +957,10 @@ fn hyperbolic_world_chart_coords(point: MPoint<f32>) -> na::Vector3<f64> {
     na::Vector3::new(signed_log(x), signed_log(y), signed_log(z))
 }
 
-/// Convert a world-space hyperbolic point to 4D noise coordinates.
-///
-/// Uses all four Minkowski coordinates with signed-log transformation.
-/// This avoids all 3D chart singularities by staying in the full
-/// embedding space, while linearizing the exponential growth.
-fn hyperbolic_world_chart_coords_4d(point: MPoint<f32>) -> na::Vector4<f64> {
-    let v: na::Vector4<f32> = point.into();
-    let x = v.x as f64;
-    let y = v.y as f64;
-    let z = v.z as f64;
-    let w = v.w as f64;
-
-    fn signed_log(v: f64) -> f64 {
-        v.signum() * (1.0 + v.abs()).ln()
-    }
-
-    // w is always >= 1 on the hyperboloid, so we offset and use unsigned log
-    let w_transformed = (w.max(1.0)).ln();
-
-    na::Vector4::new(signed_log(x), signed_log(y), signed_log(z), w_transformed)
-}
-
 mod remcpe {
     use super::*;
-    use crate::hyper_noise::{FbmConfig, HyperbolicNoise};
-    use rand::{Rng, SeedableRng};
-    use rand_pcg::Pcg64Mcg;
 
-    const MC_MIN_HEIGHT: f32 = -96.0;
-    const MC_MAX_HEIGHT: f32 = 96.0;
-    #[allow(dead_code)]
-    const FLAT_COLUMN_HEIGHT: f32 = 0.0;
     const DEFAULT_SURFACE_DEPTH_MIN: u8 = 1;
-    const DEFAULT_SURFACE_DEPTH_MAX: u8 = 3;
-    pub(super) const CAVE_PROBABILITY: f32 = 0.0;
-    // Fixed-point quantization for hashing world-space coordinates.
-    // Using raw float bit patterns (`to_bits`) is extremely sensitive to tiny
-    // cross-face FP differences and can create visible seams.
-    pub(super) const HASH_COORD_QUANT: f64 = 256.0;
-    // Frequencies are expressed in inverse block-units so we match remcpe's "64-block" coarse rolloff
-    // even though our local block scale comes from hyperbolic distances.
-    const HEIGHT_NOISE_BASE_FREQ_BLOCKS: f64 = 1.0 / 64.0;
-    // Matches remcpe's vertical wiggle in block units before we rescale into the local chunk span.
-    const HEIGHT_NOISE_AMPLITUDE: f32 = 24.0;
-    // Broad-scale continental shaping; remcpe used a very low-frequency stack (perlin7 ~200 block period).
-    const HEIGHT_CONTINENT_FREQ_BLOCKS: f64 = 1.0 / 200.0;
-    const HEIGHT_CONTINENT_AMPLITUDE: f32 = 32.0;
-    const HEIGHT_CONTINENT_GAIN: f32 = 0.6;
-    // Secondary detail layer to mimic remcpe's perlin1/2 blend with a chooser mask.
-    const HEIGHT_DETAIL_FREQ_BLOCKS: f64 = HEIGHT_NOISE_BASE_FREQ_BLOCKS * 2.0;
-    const HEIGHT_MASK_FREQ_BLOCKS: f64 = 1.0 / 8.0;
-    /// Scales how strongly the multi-octave height noise modulates the
-    /// enviro-based elevation envelope. Values in ~[0.2, 0.6] give
-    /// noticeable relief without destroying large-scale structure.
-    const TERRAIN_DETAIL_GAIN: f32 = 0.4;
-
-    fn scale_height_to_chunk(value: f32) -> f32 {
-        value
-    }
-
-    #[inline]
-    fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
-        a + (b - a) * t
-    }
 
     pub fn generate_chunk(params: &ChunkParams) -> VoxelData {
         let mut voxels = VoxelData::Solid(BlockKind::Air.id());
@@ -1056,19 +976,13 @@ mod remcpe {
         voxels
     }
 
+    /// Biome identifier. Currently only Plains is used; other variants are placeholders
+    /// for future biome implementation.
+    #[allow(dead_code)]
     #[repr(u8)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum BiomeId {
-        RainForest,
-        Swampland,
-        SeasonalForest,
-        Forest,
-        Savanna,
-        Shrubland,
-        Taiga,
-        Desert,
-        Plains,
-        Tundra,
+        Plains = 0,
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -1079,122 +993,14 @@ mod remcpe {
     }
 
     pub(super) fn sample_debug_biome(
-        world_seed: u64,
-        coords2: na::Vector2<f64>,
+        _world_seed: u64,
+        _coords2: na::Vector2<f64>,
     ) -> DebugBiomeSample {
-        let _ = (world_seed, coords2);
-        let climate = ClimateSample {
+        // Scorched-earth: return neutral constant values
+        DebugBiomeSample {
+            biome_id: BiomeId::Plains as u8,
             temperature: 0.5,
             humidity: 0.5,
-            blend: 0.5,
-        };
-        let biome = BiomeId::Plains;
-        DebugBiomeSample {
-            biome_id: biome_debug_index(biome),
-            temperature: climate.temperature,
-            humidity: climate.humidity,
-        }
-    }
-
-    #[inline]
-    fn biome_debug_index(biome: BiomeId) -> u8 {
-        biome as u8
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    struct BiomeAttrs {
-        top_block: BlockID,
-        filler_block: BlockID,
-        freeze_water: bool,
-        tree_weight: i32,
-        height_offset: f32,
-        is_desert: bool,
-    }
-
-    impl BiomeAttrs {
-        fn of(id: BiomeId) -> Self {
-            match id {
-                BiomeId::RainForest => Self {
-                    top_block: BlockKind::Grass.id(),
-                    filler_block: BlockKind::Dirt.id(),
-                    freeze_water: false,
-                    tree_weight: 8,
-                    height_offset: 6.0,
-                    is_desert: false,
-                },
-                BiomeId::Swampland => Self {
-                    top_block: BlockKind::Grass.id(),
-                    filler_block: BlockKind::Dirt.id(),
-                    freeze_water: false,
-                    tree_weight: 2,
-                    height_offset: 0.0,
-                    is_desert: false,
-                },
-                BiomeId::SeasonalForest => Self {
-                    top_block: BlockKind::Grass.id(),
-                    filler_block: BlockKind::Dirt.id(),
-                    freeze_water: false,
-                    tree_weight: 5,
-                    height_offset: 3.0,
-                    is_desert: false,
-                },
-                BiomeId::Forest => Self {
-                    top_block: BlockKind::Grass.id(),
-                    filler_block: BlockKind::Dirt.id(),
-                    freeze_water: false,
-                    tree_weight: 6,
-                    height_offset: 4.0,
-                    is_desert: false,
-                },
-                BiomeId::Savanna => Self {
-                    top_block: BlockKind::Grass.id(),
-                    filler_block: BlockKind::Dirt.id(),
-                    freeze_water: false,
-                    tree_weight: 1,
-                    height_offset: -2.0,
-                    is_desert: false,
-                },
-                BiomeId::Shrubland => Self {
-                    top_block: BlockKind::Grass.id(),
-                    filler_block: BlockKind::Dirt.id(),
-                    freeze_water: false,
-                    tree_weight: 1,
-                    height_offset: 0.0,
-                    is_desert: false,
-                },
-                BiomeId::Taiga => Self {
-                    top_block: BlockKind::Grass.id(),
-                    filler_block: BlockKind::Dirt.id(),
-                    freeze_water: true,
-                    tree_weight: 4,
-                    height_offset: 2.0,
-                    is_desert: false,
-                },
-                BiomeId::Desert => Self {
-                    top_block: BlockKind::Sand.id(),
-                    filler_block: BlockKind::Sandstone.id(),
-                    freeze_water: false,
-                    tree_weight: 0,
-                    height_offset: -6.0,
-                    is_desert: true,
-                },
-                BiomeId::Plains => Self {
-                    top_block: BlockKind::Grass.id(),
-                    filler_block: BlockKind::Dirt.id(),
-                    freeze_water: false,
-                    tree_weight: 1,
-                    height_offset: -2.0,
-                    is_desert: false,
-                },
-                BiomeId::Tundra => Self {
-                    top_block: BlockKind::SnowBlock.id(),
-                    filler_block: BlockKind::Dirt.id(),
-                    freeze_water: true,
-                    tree_weight: 0,
-                    height_offset: -4.0,
-                    is_desert: false,
-                },
-            }
         }
     }
 
@@ -1202,8 +1008,6 @@ mod remcpe {
     struct ColumnData {
         horizontal: na::Vector2<f32>,
         height: f32,
-        biome: BiomeId,
-        attrs: BiomeAttrs,
         surface_depth: u8,
         vegetation_bias: f32,
         top_voxel: Option<na::Vector3<u8>>,
@@ -1215,8 +1019,6 @@ mod remcpe {
             Self {
                 horizontal: na::Vector2::zeros(),
                 height: 0.0,
-                biome: BiomeId::Plains,
-                attrs: BiomeAttrs::of(BiomeId::Plains),
                 surface_depth: 1,
                 vegetation_bias: 0.0,
                 top_voxel: None,
@@ -1233,156 +1035,6 @@ mod remcpe {
                 .orientation()
                 .column_index_components(params.dimension, axis0, axis1)
         }
-    }
-
-    const BIOME_TEMP_FREQ: f64 = 0.025;
-    const BIOME_HUM_FREQ: f64 = 0.05;
-    const BIOME_VARIATION_FREQ: f64 = 0.25;
-    const BIOME_TEMP_SEED: u64 = 0x71e7_fe11_d00d_beef;
-    const BIOME_HUM_SEED: u64 = 0xc0fe_babe_face_feed;
-    const BIOME_VARIATION_SEED: u64 = 0xb10b_1e55_5eed_cafe;
-    const HEIGHT_PRIMARY_FREQ: f64 = HEIGHT_NOISE_BASE_FREQ_BLOCKS;
-    const HEIGHT_SECONDARY_FREQ: f64 = HEIGHT_DETAIL_FREQ_BLOCKS;
-    const HEIGHT_CHOOSER_FREQ: f64 = HEIGHT_MASK_FREQ_BLOCKS;
-    const HEIGHT_EROSION_FREQ: f64 = 1.0 / 96.0;
-
-    const CLIMATE_FBM: FbmConfig = FbmConfig {
-        octaves: 4,
-        lacunarity: 2.0,
-        gain: 0.5,
-    };
-    const CLIMATE_VARIATION_FBM: FbmConfig = FbmConfig {
-        octaves: 2,
-        lacunarity: 2.0,
-        gain: 0.5,
-    };
-
-    // ---------------------------------------------------------------------
-    // remcpe-analog octave combiner
-    // ---------------------------------------------------------------------
-    // remcpe's PerlinNoise::getRegion calls ImprovedNoise::add with an octave
-    // accumulator `x` that starts at 1.0 and is halved each octave.
-    // ImprovedNoise::add adds `(1/a12) * noise(...)` where `a12 == x`, while
-    // also scaling the input frequency by `x`.
-    // Net effect: *lower* frequencies get *higher* weight, which produces much
-    // smoother fields than a standard fBm (frequency doubles per octave).
-    //
-    // Our previous fBm-based implementation biased too heavily toward fine
-    // detail, which matches the "frequency too high" reports.
-
-    #[inline]
-    fn octave_seed(base: u64, octave: u8) -> u64 {
-        // Mix in octave index to emulate remcpe's separate ImprovedNoise instances.
-        hash(base, 0x9E37_79B1_85EB_CA87_u64.wrapping_mul(octave as u64))
-    }
-
-    fn remcpe_perlin2(seed: u64, coords: na::Vector2<f64>, base_freq: f64, octaves: u8) -> f32 {
-        let mut x = 1.0_f64;
-        let mut sum = 0.0_f64;
-        let octaves = octaves.max(1);
-        for i in 0..octaves {
-            let n = HyperbolicNoise::new(octave_seed(seed, i));
-            sum += (1.0 / x) * n.sample2(coords * (base_freq * x));
-            x *= 0.5;
-        }
-        sum as f32
-    }
-
-    fn remcpe_perlin3(seed: u64, coords: na::Vector3<f64>, base_freq: f64, octaves: u8) -> f32 {
-        let mut x = 1.0_f64;
-        let mut sum = 0.0_f64;
-        let octaves = octaves.max(1);
-        for i in 0..octaves {
-            let n = HyperbolicNoise::new(octave_seed(seed, i));
-            sum += (1.0 / x) * n.sample3(coords * (base_freq * x));
-            x *= 0.5;
-        }
-        sum as f32
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    struct ClimateSample {
-        temperature: f32,
-        humidity: f32,
-        #[allow(dead_code)]
-        blend: f32,
-    }
-
-    fn sample_climate(_world_seed: u64, _coords2: na::Vector2<f64>) -> ClimateSample {
-        // Scorched-earth: return a neutral, constant climate.
-        ClimateSample {
-            temperature: 0.5,
-            humidity: 0.5,
-            blend: 0.5,
-        }
-    }
-
-    fn compute_column_height_blocks(
-        _params: &ChunkParams,
-        _local: na::Vector3<f32>,
-        _climate: &ClimateSample,
-        _attrs: &BiomeAttrs,
-    ) -> f32 {
-        // Scorched-earth: flat at sea level.
-        0.0
-    }
-
-    fn remcpe_biome_lut() -> &'static [BiomeId; 64 * 64] {
-        static LUT: OnceLock<[BiomeId; 64 * 64]> = OnceLock::new();
-        LUT.get_or_init(|| {
-            let mut map = [BiomeId::Plains; 64 * 64];
-            // remcpe stores the biome LUT indexed as: map[hum + temp * 64]
-            // (see Biome::getBiome in remcpe). Keep the same layout.
-            for hum_i in 0..64 {
-                for temp_i in 0..64 {
-                    let hum = hum_i as f32 / 63.0;
-                    let temp = temp_i as f32 / 63.0;
-                    map[hum_i + temp_i * 64] = remcpe_pick_biome(temp, hum);
-                }
-            }
-            map
-        })
-    }
-
-    fn remcpe_pick_biome(temp: f32, hum: f32) -> BiomeId {
-        if temp < 0.1 {
-            return BiomeId::Tundra;
-        }
-        let ht = hum * temp;
-        if ht < 0.2 {
-            if temp >= 0.5 {
-                if temp >= 0.95 {
-                    return BiomeId::Desert;
-                }
-                return BiomeId::Savanna;
-            }
-            return BiomeId::Tundra;
-        }
-        if ht > 0.5 && ht < 0.7 {
-            return BiomeId::Swampland;
-        }
-        if temp < 0.5 {
-            return BiomeId::Taiga;
-        }
-        if temp >= 0.97 {
-            if ht < 0.45 {
-                return BiomeId::Plains;
-            }
-            if ht < 0.9 {
-                return BiomeId::SeasonalForest;
-            }
-            return BiomeId::RainForest;
-        }
-        if temp >= 0.35 {
-            return BiomeId::Forest;
-        }
-        BiomeId::Shrubland
-    }
-
-    fn remcpe_lookup_biome(temp: f32, hum: f32) -> BiomeId {
-        let temp_i = (temp.clamp(0.0, 1.0) * 63.0).floor() as usize;
-        let hum_i = (hum.clamp(0.0, 1.0) * 63.0).floor() as usize;
-        remcpe_biome_lut()[hum_i + temp_i * 64]
     }
 
     fn build_columns(params: &ChunkParams) -> Vec<ColumnData> {
@@ -1402,8 +1054,6 @@ mod remcpe {
                 let mut column = ColumnData::new();
                 column.horizontal = na::Vector2::new(local[axis0 as usize], local[axis1 as usize]);
                 column.height = 0.0;
-                column.biome = BiomeId::Plains;
-                column.attrs = BiomeAttrs::of(BiomeId::Plains);
                 column.surface_depth = DEFAULT_SURFACE_DEPTH_MIN;
                 column.vegetation_bias = 0.0;
                 columns[idx] = column;
@@ -1411,32 +1061,6 @@ mod remcpe {
         }
 
         columns
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_column_heights(params: &ChunkParams) -> Vec<f32> {
-        let columns = build_columns(params);
-        columns.into_iter().map(|c| c.height).collect()
-    }
-
-    #[cfg(test)]
-    pub(super) fn sample_height_for_tests(params: &ChunkParams, local: na::Vector3<f32>) -> f32 {
-        let coords2 = params.hyperbolic_block_coords(local);
-        let climate = sample_climate(params.world_seed, coords2);
-        let biome = remcpe_lookup_biome(climate.temperature, climate.humidity);
-        let attrs = BiomeAttrs::of(biome);
-        compute_column_height_blocks(params, local, &climate, &attrs)
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_expected_height_span_chunk_units(_params: &ChunkParams) -> f32 {
-        // Scorched-earth: flat at sea level, no expected spread.
-        0.0
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_min_cave_height(params: &ChunkParams) -> f32 {
-        scale_height_to_chunk(MC_MIN_HEIGHT + 4.0)
     }
 
     fn fill_base_layers(params: &ChunkParams, voxels: &mut [BlockID], columns: &mut [ColumnData]) {
@@ -1472,216 +1096,13 @@ mod remcpe {
 
     fn carve_caves(_params: &ChunkParams, _voxels: &mut [BlockID], _columns: &[ColumnData]) {}
 
-    struct OreConfig {
-        block: BlockID,
-        attempts: u32,
-        cluster: u8,
-        min_height: f32,
-        max_height: f32,
-    }
-
     fn populate_ores(_params: &ChunkParams, _voxels: &mut [BlockID], _columns: &[ColumnData]) {}
-
-    fn place_ore_cluster(
-        params: &ChunkParams,
-        voxels: &mut [BlockID],
-        start: na::Vector3<u8>,
-        cluster: u8,
-        block: BlockID,
-        rng: &mut Pcg64Mcg,
-    ) {
-        let dimension = params.dimension;
-        for _ in 0..cluster {
-            let offset = [
-                rng.random_range(-1..=1),
-                rng.random_range(-1..=1),
-                rng.random_range(-1..=1),
-            ];
-            let mut coords = start;
-            for axis in 0..3 {
-                let value = coords[axis] as i16 + offset[axis] as i16;
-                if value < 0 || value >= dimension as i16 {
-                    continue;
-                }
-                coords[axis] = value as u8;
-            }
-            let idx = index(dimension, coords);
-            if matches!(voxels[idx], b if b == BlockKind::Stone.id()) {
-                voxels[idx] = block;
-            }
-        }
-    }
-
-    fn column_height(params: &ChunkParams, coords: na::Vector3<u8>) -> f32 {
-        let center = voxel_center(params.dimension, coords);
-        -params.surface.distance_to_chunk(params.chunk, &center) * f32::from(params.dimension)
-    }
 
     fn populate_surface_features(
         _params: &ChunkParams,
         _voxels: &mut [BlockID],
         _columns: &mut [ColumnData],
     ) {
-    }
-
-    fn place_tree(
-        params: &ChunkParams,
-        voxels: &mut [BlockID],
-        base: na::Vector3<u8>,
-        rng: &mut Pcg64Mcg,
-    ) -> bool {
-        let height = rng.random_range(4..7);
-        let orientation = params.orientation();
-        if !can_extend_along_up(params.dimension, base, &orientation, height as i32 + 2) {
-            return false;
-        }
-        let idx = index(params.dimension, base);
-        let soil = voxels[idx];
-        if soil != BlockKind::Grass.id() && soil != BlockKind::Dirt.id() {
-            return false;
-        }
-        let mut pos = base.map(|c| i32::from(c));
-        for _ in 0..height {
-            pos = offset_along_axis(pos, orientation.up_axis(), orientation.up_sign() as i32);
-            if !in_bounds(pos, params.dimension) {
-                return false;
-            }
-            let coords = vec_i32_to_u8(pos);
-            let idx = index(params.dimension, coords);
-            voxels[idx] = BlockKind::Log.id();
-        }
-        let mut leaf_base = base.map(|c| i32::from(c));
-        leaf_base = offset_along_axis(
-            leaf_base,
-            orientation.up_axis(),
-            orientation.up_sign() as i32 * height as i32,
-        );
-        let [axis_a, axis_b] = orientation.horizontal_axes();
-        for dx in -2i32..=2i32 {
-            for dz in -2i32..=2i32 {
-                for dy in 0i32..=2i32 {
-                    if dx.abs() + dz.abs() + dy > 4 {
-                        continue;
-                    }
-                    let mut coords = leaf_base;
-                    coords[axis_a as usize] += dx;
-                    coords[axis_b as usize] += dz;
-                    coords[orientation.up_axis() as usize] += dy * orientation.up_sign() as i32;
-                    if !in_bounds(coords, params.dimension) {
-                        continue;
-                    }
-                    let coords_u8 = vec_i32_to_u8(coords);
-                    let idx = index(params.dimension, coords_u8);
-                    if voxels[idx] == BlockKind::Air.id() {
-                        voxels[idx] = BlockKind::Leaves.id();
-                    }
-                }
-            }
-        }
-        true
-    }
-
-    fn place_cactus(
-        params: &ChunkParams,
-        voxels: &mut [BlockID],
-        base: na::Vector3<u8>,
-        height: u8,
-    ) {
-        let orientation = params.orientation();
-        if !can_extend_along_up(params.dimension, base, &orientation, height as i32 + 1) {
-            return;
-        }
-        let mut pos = base.map(|c| i32::from(c));
-        for _ in 0..height {
-            pos = offset_along_axis(pos, orientation.up_axis(), orientation.up_sign() as i32);
-            if !in_bounds(pos, params.dimension) {
-                break;
-            }
-            let coords = vec_i32_to_u8(pos);
-            let idx = index(params.dimension, coords);
-            voxels[idx] = BlockKind::Cactus.id();
-        }
-    }
-
-    fn place_flower(params: &ChunkParams, voxels: &mut [BlockID], base: na::Vector3<u8>) {
-        if let Some(coords) = neighbor_up(params.dimension, base, params.orientation()) {
-            let idx = index(params.dimension, coords);
-            if voxels[idx] == BlockKind::Air.id() {
-                voxels[idx] = BlockKind::Flower.id();
-            }
-        }
-    }
-
-    fn place_mushroom(
-        params: &ChunkParams,
-        voxels: &mut [BlockID],
-        base: na::Vector3<u8>,
-        brown: bool,
-    ) {
-        if let Some(coords) = neighbor_up(params.dimension, base, params.orientation()) {
-            let idx = index(params.dimension, coords);
-            if voxels[idx] == BlockKind::Air.id() {
-                voxels[idx] = if brown {
-                    BlockKind::BrownMushroom.id()
-                } else {
-                    BlockKind::RedMushroom.id()
-                };
-            }
-        }
-    }
-
-    fn neighbor_up(
-        dimension: u8,
-        base: na::Vector3<u8>,
-        orientation: ChunkOrientation,
-    ) -> Option<na::Vector3<u8>> {
-        let next = offset_along_axis(
-            base.map(|c| i32::from(c)),
-            orientation.up_axis(),
-            orientation.up_sign() as i32,
-        );
-        if !in_bounds(next, dimension) {
-            None
-        } else {
-            Some(vec_i32_to_u8(next))
-        }
-    }
-
-    fn can_extend_along_up(
-        dimension: u8,
-        base: na::Vector3<u8>,
-        orientation: &ChunkOrientation,
-        needed: i32,
-    ) -> bool {
-        let coord = i32::from(base[orientation.up_axis() as usize]);
-        let room = if orientation.up_sign() > 0 {
-            (i32::from(dimension) - 1) - coord
-        } else {
-            coord
-        };
-        room >= needed
-    }
-
-    fn offset_along_axis(
-        mut coords: na::Vector3<i32>,
-        axis: CoordAxis,
-        delta: i32,
-    ) -> na::Vector3<i32> {
-        coords[axis as usize] += delta;
-        coords
-    }
-
-    fn in_bounds(coords: na::Vector3<i32>, dimension: u8) -> bool {
-        coords.x >= 0
-            && coords.y >= 0
-            && coords.z >= 0
-            && coords.x < i32::from(dimension)
-            && coords.y < i32::from(dimension)
-            && coords.z < i32::from(dimension)
-    }
-
-    fn vec_i32_to_u8(coords: na::Vector3<i32>) -> na::Vector3<u8> {
-        na::Vector3::new(coords.x as u8, coords.y as u8, coords.z as u8)
     }
 }
 
@@ -2050,62 +1471,8 @@ mod test {
         }
     }
 
-    fn assert_height_continuity(
-        params_a: &ChunkParams,
-        params_b: &ChunkParams,
-        chunk_a: ChunkId,
-        chunk_b: ChunkId,
-        axis: CoordAxis,
-        sign: CoordSign,
-    ) {
-        const GRID_STEPS: usize = 6;
-        const HEIGHT_EPS: f32 = 1e-3;
-        let mut base = [0.5f32; 3];
-        base[axis as usize] = if matches!(sign, CoordSign::Plus) {
-            1.0
-        } else {
-            0.0
-        };
-        let [axis_u, axis_v] = axis.other_axes();
-
-        for i in 0..=GRID_STEPS {
-            for j in 0..=GRID_STEPS {
-                let mut local_a = na::Vector3::new(base[0], base[1], base[2]);
-                local_a[axis_u as usize] = i as f32 / GRID_STEPS as f32;
-                local_a[axis_v as usize] = j as f32 / GRID_STEPS as f32;
-
-                let mut local_b =
-                    convert_local_between_vertices(chunk_a.vertex, chunk_b.vertex, local_a);
-                assert!(
-                    local_b.iter().all(|c| (-1e-3..=1.0 + 1e-3).contains(c)),
-                    "converted local coords outside chunk: {:?}",
-                    local_b
-                );
-                local_b = local_b.map(|c| c.clamp(0.0, 1.0));
-
-                let block2_a = params_a.hyperbolic_block_coords(local_a);
-                let block2_b = params_b.hyperbolic_block_coords(local_b);
-                let block_diff = (block2_a - block2_b).norm();
-                let height_a = remcpe::sample_height_for_tests(params_a, local_a);
-                let height_b = remcpe::sample_height_for_tests(params_b, local_b);
-                assert!(
-                    (height_a - height_b).abs() < HEIGHT_EPS,
-                    "height discontinuity across face axis={axis:?} sign={sign:?} samples=({i},{j}): {height_a} vs {height_b}, block_diff={block_diff}"
-                );
-            }
-        }
-    }
-
     fn sample_block_height_for_tests(params: &ChunkParams, local: na::Vector3<f32>) -> f32 {
         -params.surface.distance_to_chunk(params.chunk, &local) * f32::from(params.dimension)
-    }
-
-    fn quantize_cave_hash_coords(coords: na::Vector3<f64>) -> (u64, u64, u64) {
-        let q = remcpe::HASH_COORD_QUANT;
-        let hx_q = (coords.x * q).round() as i64 as u64;
-        let hy_q = (coords.y * q).round() as i64 as u64;
-        let hz_q = (coords.z * q).round() as i64 as u64;
-        (hx_q, hy_q, hz_q)
     }
 
     #[test]
@@ -2137,90 +1504,6 @@ mod test {
                         0x5eed_5eed,
                     );
                     assert_face_continuity(&params_a, &params_b, current, neighbor, axis, sign);
-                    current = neighbor;
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn cave_hash_coords_continuity_across_faces() {
-        // Caves are carved by hashing quantized world-space coordinates. If that quantization
-        // differs across a shared face (due to FP drift), tunnels can visibly "cut off" at
-        // chunk boundaries. This test validates the hash inputs match for the same world points.
-        const GRID_STEPS: usize = 6;
-        let world_seed = 0x5eed_5eed_u64;
-        let mut graph = Graph::new(CHUNK_SIZE);
-
-        for axis in CoordAxis::iter() {
-            for sign in CoordSign::iter() {
-                let chunk_a = ChunkId::new(NodeId::ROOT, Vertex::A);
-                if matches!(sign, CoordSign::Minus) {
-                    let side = chunk_a.vertex.canonical_sides()[axis as usize];
-                    graph.ensure_neighbor(chunk_a.node, side);
-                }
-                let Some(chunk_b) = graph.get_chunk_neighbor(chunk_a, axis, sign) else {
-                    continue;
-                };
-
-                let params_a =
-                    ChunkParams::new(&mut graph, chunk_a, WorldgenPreset::Hyperbolic, world_seed);
-                let params_b =
-                    ChunkParams::new(&mut graph, chunk_b, WorldgenPreset::Hyperbolic, world_seed);
-
-                // Sample points across the *shared face*.
-                let mut base = [0.5f32; 3];
-                base[axis as usize] = if matches!(sign, CoordSign::Plus) {
-                    1.0
-                } else {
-                    0.0
-                };
-                let [axis_u, axis_v] = axis.other_axes();
-
-                for i in 0..=GRID_STEPS {
-                    for j in 0..=GRID_STEPS {
-                        let mut local_a = na::Vector3::new(base[0], base[1], base[2]);
-                        local_a[axis_u as usize] = i as f32 / GRID_STEPS as f32;
-                        local_a[axis_v as usize] = j as f32 / GRID_STEPS as f32;
-
-                        let local_b =
-                            convert_local_between_vertices(chunk_a.vertex, chunk_b.vertex, local_a);
-
-                        let coords_a = params_a.hyperbolic_block_coords_3d(local_a);
-                        let coords_b = params_b.hyperbolic_block_coords_3d(local_b);
-
-                        let qa = quantize_cave_hash_coords(coords_a);
-                        let qb = quantize_cave_hash_coords(coords_b);
-                        assert_eq!(
-                            qa, qb,
-                            "cave hash coord quantization diverged across face axis={axis:?} sign={sign:?}: qa={qa:?} qb={qb:?}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn terrain_height_continuity_across_faces() {
-        const STRIP_STEPS: usize = 30;
-        let mut graph = Graph::new(CHUNK_SIZE);
-        for axis in CoordAxis::iter() {
-            for sign in CoordSign::iter() {
-                let mut current = ChunkId::new(NodeId::ROOT, Vertex::A);
-                for _ in 0..STRIP_STEPS {
-                    if matches!(sign, CoordSign::Minus) {
-                        let side = current.vertex.canonical_sides()[axis as usize];
-                        graph.ensure_neighbor(current.node, side);
-                    }
-                    let Some(neighbor) = graph.get_chunk_neighbor(current, axis, sign) else {
-                        break;
-                    };
-                    let params_a =
-                        ChunkParams::new(&mut graph, current, WorldgenPreset::Hyperbolic, 0x1);
-                    let params_b =
-                        ChunkParams::new(&mut graph, neighbor, WorldgenPreset::Hyperbolic, 0x1);
-                    assert_height_continuity(&params_a, &params_b, current, neighbor, axis, sign);
                     current = neighbor;
                 }
             }
@@ -2718,8 +2001,6 @@ mod test {
         let params = ChunkParams::new(&mut graph, chunk, WorldgenPreset::Hyperbolic, 0xdecaf_bad);
 
         assert_block_scale_alignment(&params);
-        assert_height_span_matches(&params);
-        assert_cave_probability_matches(&params);
     }
 
     fn assert_block_scale_alignment(params: &ChunkParams) {
@@ -2747,102 +2028,6 @@ mod test {
         assert!(
             (vertical_scaled - 1.0).abs() < 0.35,
             "vertical scale deviated: scaled delta={vertical_scaled:.4}"
-        );
-    }
-
-    fn assert_height_span_matches(params: &ChunkParams) {
-        let heights = remcpe::test_column_heights(params);
-        assert!(
-            !heights.is_empty(),
-            "no columns were sampled for statistics"
-        );
-        let min_height = heights.iter().copied().fold(f32::INFINITY, f32::min);
-        let max_height = heights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let observed_span = max_height - min_height;
-        let expected_span = remcpe::test_expected_height_span_chunk_units(params);
-        let mean = heights.iter().copied().sum::<f32>() / heights.len() as f32;
-        let variance =
-            heights.iter().map(|h| (*h - mean).powi(2)).sum::<f32>() / heights.len() as f32;
-        let std_dev = variance.sqrt();
-        assert!(
-            observed_span >= expected_span * 0.05,
-            "height span collapsed: observed={observed_span:.3}, expected target={expected_span:.3}"
-        );
-        assert!(
-            std_dev >= expected_span * 0.015,
-            "height std-dev collapsed: std={std_dev:.3}, expected target={expected_span:.3}"
-        );
-    }
-
-    fn assert_cave_probability_matches(params: &ChunkParams) {
-        let voxels = params.generate_voxels();
-        let data: &[BlockID] = match &voxels {
-            VoxelData::Dense(data) => data,
-            VoxelData::Solid(_) => panic!("worldgen returned solid chunk; expected dense data"),
-        };
-
-        let dimension = params.dimension;
-        let column_heights = remcpe::test_column_heights(params);
-        let min_cave_height = remcpe::test_min_cave_height(params);
-        let orientation = params.orientation();
-        let mut candidate_voxels = 0u32;
-        let mut carved_voxels = 0u32;
-
-        for (x, y, z) in VoxelCoords::new(dimension) {
-            let coords = na::Vector3::new(x, y, z);
-            let column_idx = orientation.column_index(dimension, coords);
-            let column_height = column_heights[column_idx];
-            let center = voxel_center(dimension, coords);
-            let block_height =
-                -params.surface.distance_to_chunk(params.chunk, &center) * f32::from(dimension);
-            if block_height > column_height || block_height < min_cave_height {
-                continue;
-            }
-
-            // Must match the runtime cave-carving eligibility.
-            let dist = column_height - block_height;
-            if dist < 4.0 {
-                continue;
-            }
-
-            let block_index = index(dimension, coords);
-            let block = data[block_index];
-            if block == BlockKind::Bedrock.id()
-                || block == BlockKind::Water.id()
-                || block == BlockKind::Ice.id()
-            {
-                continue;
-            }
-
-            candidate_voxels += 1;
-            let hyper_coords = params.hyperbolic_block_coords_3d(center);
-            let hx_q = (hyper_coords.x * remcpe::HASH_COORD_QUANT).round() as i64 as u64;
-            let hy_q = (hyper_coords.y * remcpe::HASH_COORD_QUANT).round() as i64 as u64;
-            let hz_q = (hyper_coords.z * remcpe::HASH_COORD_QUANT).round() as i64 as u64;
-            let coord_hash = hash(hx_q, hash(hy_q, hz_q));
-            let sample_seed = hash(params.node_spice, hash(params.world_seed, coord_hash));
-            let carve_value = ((sample_seed >> 16) & 0xffff_ffff) as f32 / u32::MAX as f32;
-            let should_carve = carve_value < remcpe::CAVE_PROBABILITY;
-            if should_carve {
-                carved_voxels += 1;
-            }
-            let actually_carved = block == BlockKind::Air.id();
-            assert_eq!(
-                should_carve, actually_carved,
-                "cave probability mismatch at {:?} (height {:.3})",
-                coords, block_height
-            );
-        }
-
-        let candidate = candidate_voxels.max(1);
-        let observed_probability = carved_voxels as f32 / candidate as f32;
-        let variance =
-            remcpe::CAVE_PROBABILITY * (1.0 - remcpe::CAVE_PROBABILITY) / candidate as f32;
-        let tolerance = variance.sqrt() * 3.0 + 0.001;
-        assert!(
-            (observed_probability - remcpe::CAVE_PROBABILITY).abs() <= tolerance,
-            "carved ratio deviates from configuration: observed={observed_probability:.4}, expected={:.4}",
-            remcpe::CAVE_PROBABILITY
         );
     }
 }
